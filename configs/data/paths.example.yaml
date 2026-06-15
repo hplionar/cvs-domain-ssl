@@ -1,0 +1,7 @@
+# Copy this file to configs/data/paths.local.yaml and edit for your machine.
+
+endoscapes_root: /path/to/endoscapes
+sages_root: /path/to/sages
+
+metadata_dir: metadata
+output_dir: outputs

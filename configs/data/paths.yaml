@@ -1,5 +1,0 @@
-endoscapes_root: /home/hpl/datasets/endoscapes
-sages_root: /home/hpl/datasets/sages
-
-metadata_dir: metadata
-output_dir: outputs
