@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environment
+.env
+.venv/
+venv/
+.envrc
+
+# Datasets
+datasets/
+data/raw/
+data/processed/
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+
+# Outputs
+outputs/
+checkpoints/
+features/
+*.pt
+*.pth
+*.ckpt
+
+# System
+.DS_Store
+Thumbs.db
