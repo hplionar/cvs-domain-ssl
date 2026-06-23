@@ -1,0 +1,31 @@
+{
+  "annotated_keyframes": 11090,
+  "annotated_keyframes_per_split": {
+    "test": 1799,
+    "train": 6960,
+    "val": 2331
+  },
+  "complete_cvs_positive_keyframes": 675,
+  "duplicate_samples": 0,
+  "extra_images": 0,
+  "frames_per_split": {
+    "test": 9747,
+    "train": 36694,
+    "val": 12372
+  },
+  "majority_positive_keyframes": {
+    "c1": 1892,
+    "c2": 1373,
+    "c3": 2135
+  },
+  "missing_images": 0,
+  "non_keyframes": 47723,
+  "total_frames": 58813,
+  "total_videos": 201,
+  "videos_in_multiple_splits": 0,
+  "videos_per_split": {
+    "test": 40,
+    "train": 120,
+    "val": 41
+  }
+}
