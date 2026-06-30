@@ -40,6 +40,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-train-batches", type=int, default=None)
     parser.add_argument("--limit-val-batches", type=int, default=None)
 
+    parser.add_argument(
+        "--use-pos-weight",
+        action="store_true",
+        help="Use positive-class weights computed from the training split.",
+    )
+
     return parser.parse_args()
 
 
@@ -200,6 +206,32 @@ def save_checkpoint(
         path,
     )
 
+def compute_pos_weight_from_manifest(
+    manifest_path: str,
+    split: str = "train",
+) -> torch.Tensor:
+    import pandas as pd
+
+    df = pd.read_csv(manifest_path)
+
+    df = df[
+        (df["split"] == split)
+        & (df["is_cvs_annotated"] == True)
+    ].copy()
+
+    target_cols = ["c1_consensus", "c2_consensus", "c3_consensus"]
+
+    positives = df[target_cols].sum().to_numpy(dtype=np.float32)
+    total = len(df)
+    negatives = total - positives
+
+    pos_weight = negatives / np.maximum(positives, 1.0)
+
+    print("Training positive counts:", positives)
+    print("Training negative counts:", negatives)
+    print("Using pos_weight:", pos_weight)
+
+    return torch.tensor(pos_weight, dtype=torch.float32)
 
 def main() -> None:
     args = parse_args()
@@ -218,7 +250,14 @@ def main() -> None:
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     print(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
 
-    criterion = nn.BCEWithLogitsLoss()
+    if args.use_pos_weight:
+        pos_weight = compute_pos_weight_from_manifest(
+            manifest_path=args.manifest_path,
+            split="train",
+        ).to(device)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        criterion = nn.BCEWithLogitsLoss()
 
     optimizer = torch.optim.AdamW(
         trainable_params,
