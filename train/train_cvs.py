@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from data.datasets import EndoscapesDataset
+from data.sages_datasets import SAGESFrameDataset
 from data.transforms import build_transform
 from eval.metrics import compute_multilabel_metrics_from_logits
 from models.cvs_model import CVSModel
@@ -19,6 +21,14 @@ from models.encoders.dinov2_encoder import DINOv2Encoder
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train CVS classifier.")
+
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="endoscapes",
+        choices=["endoscapes", "sages"],
+        help="Dataset to train on.",
+    )
 
     parser.add_argument("--dataset-root", type=str, required=True)
     parser.add_argument("--manifest-path", type=str, required=True)
@@ -72,29 +82,58 @@ def build_model(args: argparse.Namespace) -> CVSModel:
     return model
 
 
-def build_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
-    train_dataset = EndoscapesDataset(
-        manifest_path=args.manifest_path,
-        dataset_root=args.dataset_root,
-        split="train",
-        mode="supervised",
-        transform=build_transform(mode="supervised", split="train"),
-    )
+def build_datasets(args: argparse.Namespace):
+    if args.dataset == "endoscapes":
+        train_dataset = EndoscapesDataset(
+            manifest_path=args.manifest_path,
+            dataset_root=args.dataset_root,
+            split="train",
+            mode="supervised",
+            transform=build_transform(mode="supervised", split="train"),
+        )
 
-    val_dataset = EndoscapesDataset(
-        manifest_path=args.manifest_path,
-        dataset_root=args.dataset_root,
-        split="val",
-        mode="supervised",
-        transform=build_transform(mode="supervised", split="val"),
-    )
+        val_dataset = EndoscapesDataset(
+            manifest_path=args.manifest_path,
+            dataset_root=args.dataset_root,
+            split="val",
+            mode="supervised",
+            transform=build_transform(mode="supervised", split="val"),
+        )
+
+    elif args.dataset == "sages":
+        train_dataset = SAGESFrameDataset(
+            manifest_path=args.manifest_path,
+            dataset_root=args.dataset_root,
+            split="train",
+            mode="supervised",
+            transform=build_transform(mode="supervised", split="train"),
+        )
+
+        val_dataset = SAGESFrameDataset(
+            manifest_path=args.manifest_path,
+            dataset_root=args.dataset_root,
+            split="val",
+            mode="supervised",
+            transform=build_transform(mode="supervised", split="val"),
+        )
+
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
+
+    return train_dataset, val_dataset
+
+
+def build_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
+    train_dataset, val_dataset = build_datasets(args)
+
+    pin_memory = args.device == "cuda" and torch.cuda.is_available()
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
 
     val_loader = DataLoader(
@@ -102,7 +141,7 @@ def build_loaders(args: argparse.Namespace) -> Tuple[DataLoader, DataLoader]:
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=pin_memory,
     )
 
     print(train_dataset)
@@ -206,20 +245,34 @@ def save_checkpoint(
         path,
     )
 
+
 def compute_pos_weight_from_manifest(
     manifest_path: str,
+    dataset: str,
     split: str = "train",
 ) -> torch.Tensor:
-    import pandas as pd
-
     df = pd.read_csv(manifest_path)
 
-    df = df[
-        (df["split"] == split)
-        & (df["is_cvs_annotated"] == True)
-    ].copy()
-
     target_cols = ["c1_consensus", "c2_consensus", "c3_consensus"]
+
+    if dataset == "endoscapes":
+        df = df[
+            (df["split"] == split)
+            & (df["is_cvs_annotated"] == True)
+        ].copy()
+
+    elif dataset == "sages":
+        df = df[df["internal_split"] == split].copy()
+
+    else:
+        raise ValueError(f"Unsupported dataset for pos_weight: {dataset}")
+
+    if df.empty:
+        raise ValueError(f"No rows found for dataset={dataset}, split={split}")
+
+    missing = sorted(set(target_cols).difference(df.columns))
+    if missing:
+        raise ValueError(f"Manifest missing target columns: {missing}")
 
     positives = df[target_cols].sum().to_numpy(dtype=np.float32)
     total = len(df)
@@ -233,15 +286,24 @@ def compute_pos_weight_from_manifest(
 
     return torch.tensor(pos_weight, dtype=torch.float32)
 
+
+def save_config(output_dir: Path, args: argparse.Namespace) -> None:
+    config_path = output_dir / "config.json"
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(vars(args), f, indent=2, sort_keys=True)
+
+
 def main() -> None:
     args = parse_args()
     set_seed(args.seed)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    save_config(output_dir, args)
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"Dataset: {args.dataset}")
 
     train_loader, val_loader = build_loaders(args)
 
@@ -253,6 +315,7 @@ def main() -> None:
     if args.use_pos_weight:
         pos_weight = compute_pos_weight_from_manifest(
             manifest_path=args.manifest_path,
+            dataset=args.dataset,
             split="train",
         ).to(device)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -302,8 +365,9 @@ def main() -> None:
             f"mean_bacc={val_metrics['mean_bacc']:.4f}"
         )
 
-        if val_metrics["mAP"] > best_map:
-            best_map = val_metrics["mAP"]
+        current_map = val_metrics["mAP"]
+        if not np.isnan(current_map) and current_map > best_map:
+            best_map = current_map
             save_checkpoint(
                 path=output_dir / "best.pt",
                 model=model,
