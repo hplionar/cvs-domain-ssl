@@ -6,6 +6,8 @@
 | exp002_dinov2_b_frame_frozen_weighted | endoscapes | weighted_bce | 5 | 1 | 0.4771 | 0.8104 | 0.7157 | 5 | 0.7226 |
 | exp003_dinov2_b_sages_frame_frozen | sages | normal_bce | 5 | 4 | 0.4262 | 0.7736 | 0.6373 | 4 | 0.6373 |
 | exp004_dinov2_b_sages_frame_frozen_weighted | sages | weighted_bce | 5 | 4 | 0.4304 | 0.7841 | 0.7102 | 4 | 0.7102 |
+| exp005_dinov2_b_sages_clip_meanpool | sages | normal_bce | 5 | 5 | 0.3339 | 0.7210 | 0.5760 | 3 | 0.6059 |
+| exp006_dinov2_b_sages_clip_meanpool_weighted | sages | weighted_bce | 5 | 5 | 0.3474 | 0.7296 | 0.6565 | 2 | 0.6816 |
 | smoke_dinov2_b | endoscapes | normal_bce | 1 |  |  |  |  |  |  |
 | smoke_dinov2_b_more_val | endoscapes | normal_bce | 1 |  |  |  |  |  |  |
 | smoke_dinov2_b_weighted | endoscapes | weighted_bce | 1 |  |  |  |  |  |  |
