@@ -1,0 +1,22 @@
+{
+  "c1_ap": 0.2364101461369941,
+  "c1_auc": 0.6486436203645506,
+  "c1_bacc": 0.5252796983029542,
+  "c2_ap": 0.4418501963660038,
+  "c2_auc": 0.6817769124621835,
+  "c2_bacc": 0.5768655909220528,
+  "c3_ap": 0.41264322215616567,
+  "c3_auc": 0.7117472892732671,
+  "c3_bacc": 0.5324561120433716,
+  "checkpoint_path": "/group/pmc085/hlionar/outputs/cvs-domain-ssl/exp005_dinov2_b_sages_clip_meanpool/best.pt",
+  "clip_length": 5,
+  "dataset": "sages",
+  "loss": 0.48127773715744887,
+  "mAP": 0.36363452155305453,
+  "mean_auc": 0.680722607366667,
+  "mean_bacc": 0.5448671337561262,
+  "samples": 1260,
+  "split": "test",
+  "stride": 1,
+  "target_position": "end"
+}
