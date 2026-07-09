@@ -33,7 +33,7 @@ if torch.cuda.is_available():
 print("Decord:", decord.__version__)
 PY
 
-export PYTHONPATH=/group/pmc085/hlionar/external/jepa:$PYTHONPATH
+export PYTHONPATH=/group/pmc085/hlionar/external/jepa:${PYTHONPATH:-}
 
 python -m app.main \
   --fname configs/pretrain/sages/vitl16_sages_smoke10.yaml \
