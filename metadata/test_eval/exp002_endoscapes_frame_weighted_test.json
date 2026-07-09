@@ -1,0 +1,19 @@
+{
+  "c1_ap": 0.3909946103970626,
+  "c1_auc": 0.6615287742591677,
+  "c1_bacc": 0.6078948815217988,
+  "c2_ap": 0.308229629911097,
+  "c2_auc": 0.6851849394152544,
+  "c2_bacc": 0.6143633846058563,
+  "c3_ap": 0.5206142998223016,
+  "c3_auc": 0.746394729800799,
+  "c3_bacc": 0.6507308956816721,
+  "checkpoint_path": "/group/pmc085/hlionar/outputs/cvs-domain-ssl/exp002_dinov2_b_frame_frozen_weighted/best.pt",
+  "dataset": "endoscapes",
+  "loss": 0.5599645390120925,
+  "mAP": 0.40661284671015374,
+  "mean_auc": 0.6977028144917403,
+  "mean_bacc": 0.6243297206031091,
+  "samples": 1799,
+  "split": "test"
+}
