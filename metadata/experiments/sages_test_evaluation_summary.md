@@ -2,7 +2,7 @@
 
 Date: 8 July 2026
 
-The best validation checkpoints from Exp003–Exp006 were evaluated on the held-out SAGES internal test split. The split contains 70 videos and 1,260 labelled frame/timepoint samples.
+The best validation checkpoints from Exp003–Exp006 were evaluated on the held-out SAGES internal test split. The test split contains 70 videos and 1,260 labelled frame/timepoint samples.
 
 | Experiment | Input | Loss | Test mAP | Test mean AUC | Test mean BAcc |
 | --- | --- | --- | ---: | ---: | ---: |
@@ -15,6 +15,6 @@ The best validation checkpoints from Exp003–Exp006 were evaluated on the held-
 
 The strongest SAGES test-set baseline is Exp004: frozen DINOv2-B single-frame input with weighted BCE.
 
-The 5-frame sparse clip mean-pooling baselines underperform the single-frame baselines on test mAP and mean balanced accuracy. This suggests that simple averaging over nearby sparse-frame features does not provide effective temporal modelling for CVS prediction. Temporal context may still be useful, but it likely requires an explicit temporal model or video representation learner rather than naive feature averaging.
+The 5-frame sparse clip mean-pooling baselines underperform the single-frame baselines on both test mAP and mean balanced accuracy. This suggests that simple averaging over nearby sparse-frame features does not provide effective temporal modelling for CVS prediction.
 
 Weighted BCE improves balanced accuracy in both frame and clip settings, confirming that class imbalance remains important for CVS criterion prediction.
