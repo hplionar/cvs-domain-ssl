@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1600" viewBox="0 0 2400 1600">
+<defs>
+  <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+    <path d="M0,0 L12,6 L0,12 z" fill="#222"/>
+  </marker>
+</defs>
+<rect width="100%" height="100%" fill="white"/>
+<style>
+.t1{font:700 44px Arial;fill:#111}
+.t2{font:700 34px Arial;fill:#111}
+.t3{font:700 23px Arial;fill:#111}
+.tx{font:21px Arial;fill:#111}
+.sm{font:18px Arial;fill:#222}
+.it{font:italic 18px Arial;fill:#333}
+.box{fill:#f6f6f6;stroke:#222;stroke-width:2.2;rx:18;ry:18}
+.box2{fill:#e9e9e9;stroke:#222;stroke-width:2.4;rx:18;ry:18}
+.win{fill:#d8d8d8;stroke:#111;stroke-width:3;rx:18;ry:18}
+.arr{stroke:#222;stroke-width:3;fill:none;marker-end:url(#arrow)}
+.div{stroke:#bbb;stroke-width:3;stroke-dasharray:12 10}
+</style>
+<text x="1200.0" y="62" text-anchor="middle" class="t1">Tournament-Style Experimental Plans for Domain-Adaptive CVS Pretraining</text>
+<line x1="1200.0" y1="95" x2="1200.0" y2="1570" class="div"/>
+<text x="600" y="125" text-anchor="middle" class="t2">PLAN A — Full Four-Model Pilot</text>
+<text x="600" y="158" text-anchor="middle" class="it">All four models receive continued SSL on the same 25% surgical-data pilot before selection.</text>
+<text x="330" y="205" text-anchor="middle" class="t3">IMAGE TRACK</text>
+<text x="870" y="205" text-anchor="middle" class="t3">VIDEO TRACK</text>
+<rect x="70" y="230" width="240" height="105" class="box"/>
+<text x="190.0" y="264" text-anchor="middle" class="t3">MAE</text>
+<text x="190.0" y="294" text-anchor="middle" class="sm">Masked image reconstruction</text>
+<rect x="340" y="230" width="240" height="105" class="box"/>
+<text x="460.0" y="264" text-anchor="middle" class="t3">I-JEPA</text>
+<text x="460.0" y="294" text-anchor="middle" class="sm">Masked latent prediction</text>
+<rect x="655" y="230" width="240" height="105" class="box"/>
+<text x="775.0" y="264" text-anchor="middle" class="t3">VideoMAE</text>
+<text x="775.0" y="294" text-anchor="middle" class="sm">Masked video reconstruction</text>
+<rect x="925" y="230" width="240" height="105" class="box"/>
+<text x="1045.0" y="264" text-anchor="middle" class="t3">V-JEPA</text>
+<text x="1045.0" y="294" text-anchor="middle" class="sm">Masked video latent prediction</text>
+<rect x="150" y="390" width="350" height="120" class="box2"/>
+<text x="325.0" y="424" text-anchor="middle" class="t3">25% CONTINUED SSL PILOT</text>
+<text x="325.0" y="454" text-anchor="middle" class="sm">Same source procedures</text>
+<text x="325.0" y="477" text-anchor="middle" class="sm">Frames sampled for image SSL</text>
+<rect x="740" y="390" width="350" height="120" class="box2"/>
+<text x="915.0" y="424" text-anchor="middle" class="t3">25% CONTINUED SSL PILOT</text>
+<text x="915.0" y="454" text-anchor="middle" class="sm">Same source procedures</text>
+<text x="915.0" y="477" text-anchor="middle" class="sm">Ordered clips sampled for video SSL</text>
+<path d="M190,335 L325,390" class="arr"/>
+<path d="M460,335 L325,390" class="arr"/>
+<path d="M775,335 L915,390" class="arr"/>
+<path d="M1045,335 L915,390" class="arr"/>
+<rect x="150" y="575" width="350" height="135" class="box"/>
+<text x="325.0" y="609" text-anchor="middle" class="t3">IMAGE EVALUATION</text>
+<text x="325.0" y="639" text-anchor="middle" class="sm">Frozen encoder + common probe</text>
+<text x="325.0" y="662" text-anchor="middle" class="sm">Endoscapes + SAGES</text>
+<rect x="740" y="575" width="350" height="135" class="box"/>
+<text x="915.0" y="609" text-anchor="middle" class="t3">VIDEO EVALUATION</text>
+<text x="915.0" y="639" text-anchor="middle" class="sm">Frozen encoder + common probe</text>
+<text x="915.0" y="662" text-anchor="middle" class="sm">SAGES only</text>
+<path d="M325,510 L325,575" class="arr"/>
+<path d="M915,510 L915,575" class="arr"/>
+<rect x="175" y="765" width="300" height="100" class="win"/>
+<text x="325.0" y="799" text-anchor="middle" class="t3">IMAGE WINNER</text>
+<text x="325.0" y="829" text-anchor="middle" class="sm">Best adapted image encoder</text>
+<rect x="765" y="765" width="300" height="100" class="win"/>
+<text x="915.0" y="799" text-anchor="middle" class="t3">VIDEO WINNER</text>
+<text x="915.0" y="829" text-anchor="middle" class="sm">Best adapted video encoder</text>
+<path d="M325,710 L325,765" class="arr"/>
+<path d="M915,710 L915,765" class="arr"/>
+<rect x="150" y="925" width="350" height="115" class="box2"/>
+<text x="325.0" y="959" text-anchor="middle" class="t3">PARTIAL SUPERVISED FINE-TUNING</text>
+<text x="325.0" y="989" text-anchor="middle" class="sm">Final 25% of blocks + norm + CVS head</text>
+<rect x="740" y="925" width="350" height="115" class="box2"/>
+<text x="915.0" y="959" text-anchor="middle" class="t3">PARTIAL SUPERVISED FINE-TUNING</text>
+<text x="915.0" y="989" text-anchor="middle" class="sm">Final 25% of blocks + norm + CVS head</text>
+<path d="M325,865 L325,925" class="arr"/>
+<path d="M915,865 L915,925" class="arr"/>
+<rect x="355" y="1100" width="490" height="120" class="win"/>
+<text x="600.0" y="1134" text-anchor="middle" class="t3">GRAND FINAL</text>
+<text x="600.0" y="1164" text-anchor="middle" class="sm">Compare fine-tuned image and video finalists using</text>
+<text x="600.0" y="1187" text-anchor="middle" class="sm">validation mAP, per-criterion AP, cost, and stability</text>
+<path d="M325,1040 L500,1100" class="arr"/>
+<path d="M915,1040 L700,1100" class="arr"/>
+<rect x="355" y="1275" width="490" height="105" class="box2"/>
+<text x="600.0" y="1309" text-anchor="middle" class="t3">100% FULL-CORPUS SCALING</text>
+<text x="600.0" y="1339" text-anchor="middle" class="sm">Continue SSL only for the strongest feasible model</text>
+<path d="M600,1220 L600,1275" class="arr"/>
+<rect x="355" y="1435" width="490" height="95" class="win"/>
+<text x="600.0" y="1469" text-anchor="middle" class="t3">FINAL LOCKED-TEST EVALUATION</text>
+<text x="600.0" y="1499" text-anchor="middle" class="sm">Original checkpoint vs 25% pilot vs 100% adapted model</text>
+<path d="M600,1380 L600,1435" class="arr"/>
+<text x="1800" y="125" text-anchor="middle" class="t2">PLAN B — Reduced-Scope Fallback</text>
+<text x="1800" y="158" text-anchor="middle" class="it">Select one feasible model early, then run one mixed-data pilot.</text>
+<rect x="1285" y="230" width="220" height="100" class="box"/>
+<text x="1395.0" y="264" text-anchor="middle" class="t3">MAE</text>
+<text x="1395.0" y="294" text-anchor="middle" class="sm">Image</text>
+<rect x="1535" y="230" width="220" height="100" class="box"/>
+<text x="1645.0" y="264" text-anchor="middle" class="t3">I-JEPA</text>
+<text x="1645.0" y="294" text-anchor="middle" class="sm">Image</text>
+<rect x="1785" y="230" width="220" height="100" class="box"/>
+<text x="1895.0" y="264" text-anchor="middle" class="t3">VideoMAE</text>
+<text x="1895.0" y="294" text-anchor="middle" class="sm">Video</text>
+<rect x="2035" y="230" width="220" height="100" class="box"/>
+<text x="2145.0" y="264" text-anchor="middle" class="t3">V-JEPA</text>
+<text x="2145.0" y="294" text-anchor="middle" class="sm">Video</text>
+<rect x="1435" y="395" width="730" height="130" class="box2"/>
+<text x="1800.0" y="429" text-anchor="middle" class="t3">ORIGINAL-CHECKPOINT TRANSFER BASELINES</text>
+<text x="1800.0" y="459" text-anchor="middle" class="sm">Image: Endoscapes + SAGES    |    Video: SAGES only</text>
+<text x="1800.0" y="482" text-anchor="middle" class="sm">Frozen encoder + common pooling and linear probe</text>
+<path d="M1395,330 L1800,395" class="arr"/>
+<path d="M1645,330 L1800,395" class="arr"/>
+<path d="M1895,330 L1800,395" class="arr"/>
+<path d="M2145,330 L1800,395" class="arr"/>
+<rect x="1545" y="590" width="510" height="105" class="win"/>
+<text x="1800.0" y="624" text-anchor="middle" class="t3">SELECT ONE STRONGEST FEASIBLE MODEL</text>
+<text x="1800.0" y="654" text-anchor="middle" class="sm">Validation mAP + memory + implementation stability</text>
+<path d="M1800,525 L1800,590" class="arr"/>
+<rect x="1545" y="760" width="510" height="115" class="box2"/>
+<text x="1800.0" y="794" text-anchor="middle" class="t3">25% MIXED-CORPUS CONTINUED SSL</text>
+<text x="1800.0" y="824" text-anchor="middle" class="sm">Balanced LC/CVS-specific + general minimally invasive surgery</text>
+<text x="1800.0" y="847" text-anchor="middle" class="sm">data</text>
+<path d="M1800,695 L1800,760" class="arr"/>
+<rect x="1545" y="940" width="510" height="115" class="box"/>
+<text x="1800.0" y="974" text-anchor="middle" class="t3">EVALUATE ADAPTATION GAIN</text>
+<text x="1800.0" y="1004" text-anchor="middle" class="sm">Compare adapted checkpoint with its original transfer baseline</text>
+<path d="M1800,875 L1800,940" class="arr"/>
+<rect x="1545" y="1120" width="510" height="110" class="box2"/>
+<text x="1800.0" y="1154" text-anchor="middle" class="t3">PARTIAL SUPERVISED FINE-TUNING</text>
+<text x="1800.0" y="1184" text-anchor="middle" class="sm">Final 25% of blocks + norm + CVS head</text>
+<path d="M1800,1055 L1800,1120" class="arr"/>
+<rect x="1545" y="1290" width="510" height="100" class="win"/>
+<text x="1800.0" y="1324" text-anchor="middle" class="t3">SUCCESSFUL PILOT?</text>
+<text x="1800.0" y="1354" text-anchor="middle" class="sm">Validation mAP improves and compute remains feasible</text>
+<path d="M1800,1230 L1800,1290" class="arr"/>
+<rect x="1240" y="1440" width="430" height="95" class="box2"/>
+<text x="1455.0" y="1474" text-anchor="middle" class="t3">YES → 100% SCALING</text>
+<text x="1455.0" y="1504" text-anchor="middle" class="sm">Continue SSL on the full corpus</text>
+<rect x="1930" y="1440" width="430" height="95" class="box"/>
+<text x="2145.0" y="1474" text-anchor="middle" class="t3">NO → STOP AT PILOT</text>
+<text x="2145.0" y="1504" text-anchor="middle" class="sm">Report results and limitations</text>
+<path d="M1700,1390 L1455,1440" class="arr"/>
+<path d="M1900,1390 L2145,1440" class="arr"/>
+</svg>
