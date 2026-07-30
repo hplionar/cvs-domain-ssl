@@ -801,3 +801,61 @@ It tests whether CVS benefits more from:
 
 2. **Experiment plan:**  
    Do you approve the proposed experimental plan, using Plan A as the main approach and Plan B as the fallback if time, compute, or dataset access becomes limiting?
+
+
+## 10. Progress and Next Plan
+
+### Completed
+
+- [x] Set up the GitHub repository and project structure.
+- [x] Configured Kaya HPC, SSH access, dataset paths, and output directories.
+- [x] Set up the Python environment with PyTorch, torchvision, CUDA, and Decord.
+- [x] Validated the Endoscapes and SAGES datasets and created leakage-safe manifests and splits.
+- [x] Implemented frame and sparse-clip dataset loaders and preprocessing transforms.
+- [x] Implemented:
+  - DINOv2 encoder wrapper;
+  - CVS linear classification head;
+  - normal and weighted BCE loss;
+  - mAP, per-criterion AP, ROC-AUC, and balanced accuracy;
+  - training, checkpointing, and evaluation scripts.
+- [x] Ran six baseline experiments on Endoscapes and SAGES.
+- [x] Confirmed that weighted BCE improves balanced accuracy.
+- [x] Confirmed that simple temporal mean pooling does not outperform the single-frame baseline.
+- [x] Prepared SAGES video lists and validated MP4 loading for V-JEPA.
+
+### Next Main Experiments
+
+- [ ] Implement and test:
+  - MAE;
+  - I-JEPA;
+  - VideoMAE;
+  - V-JEPA.
+- [ ] Evaluate their original pretrained checkpoints using frozen linear probing.
+- [ ] Continue SSL for all four models using the same 25% surgical-data pilot.
+- [ ] Select the strongest image and video models.
+- [ ] Partially fine-tune the selected models using CVS labels.
+- [ ] Scale the strongest feasible model to the full surgical corpus.
+
+## Next Two Weeks
+
+### Week 1
+
+- [ ] Add unit tests for datasets, transforms, metrics, losses, model outputs, and checkpoint loading.
+- [ ] Prepare the four model wrappers and training configurations.
+- [ ] Prepare Slurm scripts and small smoke-test jobs.
+- [ ] Audit `requirements.txt` and confirm all library versions.
+- [ ] Begin writing the dissertation:
+  - problem and research questions;
+  - dataset section;
+  - implementation section;
+  - baseline results.
+
+### Week 2
+
+- [ ] Finalise the 25% pilot dataset and experiment configurations.
+- [ ] Run local preflight checks and validate all Slurm scripts.
+- [ ] When Kaya becomes available on the expected **4 August** restart:
+  - run unit and environment checks;
+  - run one small GPU smoke test per model;
+  - launch the four main experiments after the smoke tests pass.
+- [ ] Continue dissertation writing while the HPC jobs are queued or running.

@@ -1,14 +1,45 @@
-torch
-torchvision
-torchaudio
-transformers
-accelerate
-timm
-scikit-learn
-pandas
-numpy
-pyyaml
-tqdm
-pillow
-opencv-python
-matplotlib
+# Core dependencies for cvs-domain-ssl.
+#
+# PyTorch is deliberately NOT listed here. It must be installed first, with the
+# CUDA build matching the target machine, before this file is applied. See
+# docs/environment.md.
+#
+# Floors rather than exact pins: exact versions are frozen into
+# requirements.lock.txt once an environment is validated on both the local
+# machine and Kaya.
+
+# --- numerical and tabular ---
+numpy>=1.26,<3
+pandas>=2.2
+scikit-learn>=1.5
+pyyaml>=6.0
+
+# --- imaging ---
+pillow>=10.4
+
+# --- model hubs and architectures ---
+# huggingface_hub is required for the gated DINOv3 checkpoints.
+transformers>=4.44
+huggingface_hub>=0.34
+timm>=1.0.9
+einops>=0.8
+
+# --- video decoding and sharded IO ---
+# eva-decord is a maintained fork; PyPI `decord` has not shipped a wheel since
+# 2019 and fails to build on recent Python and glibc. PyAV is the fallback for
+# one-off clip pre-extraction.
+eva-decord>=0.6.1
+av>=13.0
+webdataset>=0.2.100
+
+# --- plotting and progress ---
+matplotlib>=3.9
+tqdm>=4.66
+
+# --- testing ---
+pytest>=8.0
+
+# Removed from the previous revision, unused anywhere in the repository:
+#   torchaudio      never imported; an unnecessary version-pin liability
+#   accelerate      never imported; single-GPU jobs throughout
+#   opencv-python   never imported; Pillow covers current image IO
