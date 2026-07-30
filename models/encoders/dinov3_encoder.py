@@ -20,7 +20,13 @@ import torch
 
 from models.encoders import register_encoder
 from models.encoders.base_encoder import BaseEncoder, EncoderOutput, PreprocessSpec, TokenLayout
-from models.encoders.hf_common import cfg_get, image_spec, require_transformers, spatial_grid
+from models.encoders.hf_common import (
+    cfg_get,
+    image_spec,
+    require_transformers,
+    spatial_grid,
+    vit_dims,
+)
 
 
 class DINOv3Encoder(BaseEncoder):
@@ -38,9 +44,21 @@ class DINOv3Encoder(BaseEncoder):
         *,
         model_name: str | None = None,
         model=None,
+        random_init: bool = False,
         freeze: bool = True,
     ) -> None:
         super().__init__(freeze=freeze)
+
+        if model is None and random_init:
+            require_transformers()
+            from transformers import DINOv3ViTConfig, DINOv3ViTModel
+
+            model = DINOv3ViTModel(
+                DINOv3ViTConfig(
+                    image_size=224, patch_size=16, num_register_tokens=4, **vit_dims(variant)
+                )
+            )
+            model_name = f"random-init-{variant}"
 
         if model is None:
             require_transformers()

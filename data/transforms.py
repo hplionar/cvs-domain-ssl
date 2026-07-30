@@ -137,3 +137,49 @@ __all__ = [
     "build_supervised_train_transform",
     "build_transform",
 ]
+
+
+def build_transform_from_spec(spec, *, train: bool = False) -> Callable:
+    """Build preprocessing from an encoder's own PreprocessSpec.
+
+    Extraction must never apply a hard-coded transform: checkpoints differ in
+    input resolution and normalisation, and applying one arm's preprocessing to
+    another silently invalidates any comparison between them.
+
+    ``train=False`` is deterministic (resize, centre crop) and is what the
+    cached-feature protocol requires. ``train=True`` exists only for the
+    K-augmented-views variant described in the implementation plan; note that
+    it deliberately omits colour jitter, since hue perturbation degrades the
+    tissue-colour cue that CVS criterion C2 depends on.
+    """
+
+    from torchvision import transforms as T
+
+    interpolation = {
+        "bicubic": InterpolationMode.BICUBIC,
+        "bilinear": InterpolationMode.BILINEAR,
+        "nearest": InterpolationMode.NEAREST,
+    }[spec.interpolation.lower()]
+
+    if train:
+        stages = [
+            T.RandomResizedCrop(
+                spec.image_size,
+                scale=(0.7, 1.0),
+                interpolation=interpolation,
+                antialias=True,
+            ),
+            T.RandomHorizontalFlip(p=0.5),
+        ]
+    else:
+        resize_to = int(round(spec.image_size * 256 / 224))
+        stages = [
+            T.Resize(resize_to, interpolation=interpolation, antialias=True),
+            T.CenterCrop(spec.image_size),
+        ]
+
+    stages += [T.ToTensor(), T.Normalize(mean=list(spec.mean), std=list(spec.std))]
+    return T.Compose(stages)
+
+
+__all__.append("build_transform_from_spec")

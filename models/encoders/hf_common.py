@@ -99,3 +99,22 @@ __all__ = [
     "temporal_grid",
     "video_spec",
 ]
+
+
+#: Standard ViT dimensions, used to build randomly initialised models with real
+#: geometry for smoke-testing throughput and memory without downloading weights.
+VIT_DIMS: dict[str, dict[str, int]] = {
+    "small": {"hidden_size": 384, "num_hidden_layers": 12, "num_attention_heads": 6, "intermediate_size": 1536},
+    "base": {"hidden_size": 768, "num_hidden_layers": 12, "num_attention_heads": 12, "intermediate_size": 3072},
+    "large": {"hidden_size": 1024, "num_hidden_layers": 24, "num_attention_heads": 16, "intermediate_size": 4096},
+    "huge": {"hidden_size": 1280, "num_hidden_layers": 32, "num_attention_heads": 16, "intermediate_size": 5120},
+}
+
+
+def vit_dims(variant: str) -> dict[str, int]:
+    if variant not in VIT_DIMS:
+        raise ValueError(f"No standard dimensions for variant {variant!r}.")
+    return dict(VIT_DIMS[variant])
+
+
+__all__ += ["VIT_DIMS", "vit_dims"]

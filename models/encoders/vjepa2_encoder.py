@@ -22,7 +22,14 @@ import torch
 
 from models.encoders import register_encoder
 from models.encoders.base_encoder import BaseEncoder, EncoderOutput, PreprocessSpec, TokenLayout
-from models.encoders.hf_common import cfg_get, require_transformers, spatial_grid, temporal_grid, video_spec
+from models.encoders.hf_common import (
+    cfg_get,
+    require_transformers,
+    spatial_grid,
+    temporal_grid,
+    video_spec,
+    vit_dims,
+)
 
 
 class VJEPA2Encoder(BaseEncoder):
@@ -44,9 +51,28 @@ class VJEPA2Encoder(BaseEncoder):
         model_name: str | None = None,
         model=None,
         frame_stride: int = 4,
+        random_init: bool = False,
         freeze: bool = True,
     ) -> None:
         super().__init__(freeze=freeze)
+
+        if model is None and random_init:
+            require_transformers()
+            from transformers import VJEPA2Config, VJEPA2Model
+
+            dims = vit_dims(variant)
+            model = VJEPA2Model(
+                VJEPA2Config(
+                    crop_size=224, patch_size=16, frames_per_clip=16, tubelet_size=2,
+                    hidden_size=dims["hidden_size"],
+                    num_hidden_layers=dims["num_hidden_layers"],
+                    num_attention_heads=dims["num_attention_heads"],
+                    mlp_ratio=4,
+                    pred_hidden_size=384, pred_num_hidden_layers=12,
+                    pred_num_attention_heads=12,
+                )
+            )
+            model_name = f"random-init-{variant}"
 
         if model is None:
             require_transformers()
@@ -115,7 +141,7 @@ def _vjepa2_l(**kwargs) -> VJEPA2Encoder:
 
 
 @register_encoder("vjepa2_b")
-def _vjepa2_b(model_name: str, **kwargs) -> VJEPA2Encoder:
+def _vjepa2_b(model_name: str = "", **kwargs) -> VJEPA2Encoder:
     """Distilled ViT-B. The checkpoint identifier must be given explicitly."""
     return VJEPA2Encoder(variant="base", model_name=model_name, **kwargs)
 

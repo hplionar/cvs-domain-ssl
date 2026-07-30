@@ -17,7 +17,13 @@ import torch
 
 from models.encoders import register_encoder
 from models.encoders.base_encoder import BaseEncoder, EncoderOutput, PreprocessSpec, TokenLayout
-from models.encoders.hf_common import cfg_get, image_spec, require_transformers, spatial_grid
+from models.encoders.hf_common import (
+    cfg_get,
+    image_spec,
+    require_transformers,
+    spatial_grid,
+    vit_dims,
+)
 
 
 class MAEEncoder(BaseEncoder):
@@ -35,9 +41,19 @@ class MAEEncoder(BaseEncoder):
         *,
         model_name: str | None = None,
         model=None,
+        random_init: bool = False,
         freeze: bool = True,
     ) -> None:
         super().__init__(freeze=freeze)
+
+        if model is None and random_init:
+            require_transformers()
+            from transformers import ViTMAEConfig, ViTMAEModel
+
+            model = ViTMAEModel(
+                ViTMAEConfig(image_size=224, patch_size=16, mask_ratio=0.0, **vit_dims(variant))
+            )
+            model_name = f"random-init-{variant}"
 
         if model is None:
             require_transformers()
