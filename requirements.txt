@@ -19,7 +19,7 @@ pillow>=10.4
 
 # --- model hubs and architectures ---
 # huggingface_hub is required for the gated DINOv3 checkpoints.
-transformers>=4.44
+transformers>=4.44,<6
 huggingface_hub>=0.34
 timm>=1.0.9
 einops>=0.8
