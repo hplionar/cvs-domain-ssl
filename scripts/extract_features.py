@@ -338,7 +338,11 @@ def extract(args: argparse.Namespace) -> int:
         device_type=device.type, dtype=torch.float16, enabled=args.amp and device.type == "cuda"
     )
 
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
     cursor = 0
+    warmup_done_at = None
     started = time.time()
     with torch.inference_mode():
         for inputs, ids, video_ids, target in iter_batches(loader, keys):
@@ -359,6 +363,11 @@ def extract(args: argparse.Namespace) -> int:
                 rows.append((sample_id, video_id, cursor + offset))
 
             cursor += size
+            if warmup_done_at is None:
+                # Exclude CUDA context creation and kernel autotuning from the
+                # steady-state rate, which is the figure that transfers to
+                # other hardware.
+                warmup_done_at = (time.time(), cursor)
             if args.log_every and (cursor // args.batch_size) % args.log_every == 0:
                 rate = cursor / max(time.time() - started, 1e-6)
                 remaining = (n - cursor) / max(rate, 1e-6)
@@ -389,7 +398,29 @@ def extract(args: argparse.Namespace) -> int:
         json.dump(manifest, fh, indent=2)
 
     elapsed = time.time() - started
-    print(f"\nWrote {cursor} samples in {elapsed/60:.1f} min ({cursor/elapsed:.1f}/s)")
+    print(f"\nWrote {cursor} samples in {elapsed/60:.2f} min ({cursor/elapsed:.1f}/s overall)")
+
+    if warmup_done_at is not None and cursor > warmup_done_at[1]:
+        warm_elapsed = time.time() - warmup_done_at[0]
+        warm_samples = cursor - warmup_done_at[1]
+        print(f"Steady state: {warm_samples/max(warm_elapsed, 1e-6):.1f} samples/s "
+              f"(first batch excluded)")
+
+    if device.type == "cuda":
+        peak_alloc = torch.cuda.max_memory_allocated(device) / 1024**3
+        peak_reserved = torch.cuda.max_memory_reserved(device) / 1024**3
+        total = torch.cuda.get_device_properties(device).total_memory / 1024**3
+        print(f"Peak VRAM:    {peak_alloc:.2f} GiB allocated, "
+              f"{peak_reserved:.2f} GiB reserved, of {total:.1f} GiB")
+        if peak_reserved > total:
+            print("              WARNING: reserved exceeds device memory. Under "
+                  "WSL2 the driver spills to host memory over PCIe instead of "
+                  "raising OOM, which degrades throughput several-fold. Reduce "
+                  "--batch-size; on native Linux this would have failed outright.")
+        print("              A single run cannot separate fixed overhead from "
+              "per-sample cost. Sweep --batch-size and fit "
+              "peak = fixed + marginal * batch_size.")
+
     print(f"Manifest: {out_dir / 'manifest.json'}")
     return 0
 
