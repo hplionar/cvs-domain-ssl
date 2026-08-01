@@ -318,6 +318,25 @@ def train_one_run(
     return best
 
 
+def sample_videos(video_ids: list[str], fraction: float, seed: int) -> list[str]:
+    """Draw a fraction of *videos*, not of frames.
+
+    Frames within a procedure share patient, anatomy, camera and illumination,
+    so sampling at frame level would place near-duplicates of the same
+    procedure in every fraction. The curve would then measure how much
+    redundancy was added rather than how much independent data.
+    """
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(f"fraction must be in (0, 1], got {fraction}")
+    if fraction == 1.0:
+        return list(video_ids)
+    rng = random.Random(seed)
+    shuffled = sorted(video_ids)
+    rng.shuffle(shuffled)
+    keep = max(1, int(round(fraction * len(shuffled))))
+    return shuffled[:keep]
+
+
 def build_grid(args: argparse.Namespace) -> list[dict[str, float]]:
     grid = {
         "lr": args.lr or DEFAULT_GRID["lr"],
@@ -326,6 +345,97 @@ def build_grid(args: argparse.Namespace) -> list[dict[str, float]]:
     }
     keys = sorted(grid)
     return [dict(zip(keys, values)) for values in itertools.product(*(grid[k] for k in keys))]
+
+
+def run_search(grid, seeds, train_loader, val_loader, feature_dim, args, device, pos_weight):
+    return [
+        train_one_run(config, seed, train_loader, val_loader, feature_dim, args, device, pos_weight)
+        for config in grid
+        for seed in seeds
+    ]
+
+
+def aggregate(results: list[RunResult], grid: list[dict[str, float]]) -> list[dict[str, Any]]:
+    """Rank configurations by the mean across seeds.
+
+    Not by the best single run: selecting the luckiest seed inflates both the
+    reported figure and the variance estimate derived from it.
+    """
+    out = []
+    for config in grid:
+        matching = [r for r in results if r.config == config]
+        maps = [r.best_map for r in matching]
+        out.append({
+            "config": config,
+            "mean_map": float(np.mean(maps)),
+            "std_map": float(np.std(maps, ddof=1)) if len(maps) > 1 else 0.0,
+            "seeds": {r.seed: r.best_map for r in matching},
+            "best_epochs": [r.best_epoch for r in matching],
+        })
+    out.sort(key=lambda entry: entry["mean_map"], reverse=True)
+    return out
+
+
+def learning_curve(
+    train_cache: "CachedFeatures",
+    val_loader: DataLoader,
+    grid: list[dict[str, float]],
+    seeds: list[int],
+    feature_dim: int,
+    args: argparse.Namespace,
+    device: torch.device,
+    pos_weight: torch.Tensor | None,
+    precompute: bool,
+) -> list[dict[str, Any]]:
+    """Validation mAP against fraction of labelled training videos.
+
+    Hyperparameters are re-searched at every fraction. A configuration tuned on
+    the full training set is not necessarily appropriate at 10% of it, and
+    carrying one over would confound the effect of data quantity with a
+    regularisation mismatch.
+    """
+    all_videos = train_cache.unique_video_ids()
+    curve = []
+
+    for fraction in args.label_fractions:
+        per_seed = []
+        for seed in seeds:
+            subset = sample_videos(all_videos, fraction, seed)
+            subset_cache = CachedFeatures(train_cache.directory, video_ids=subset)
+            if precompute:
+                subset_ds: Dataset = PooledFeatures(subset_cache.pooled(), subset_cache.all_targets())
+            else:
+                subset_ds = subset_cache
+            loader = DataLoader(subset_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
+
+            best = max(
+                (
+                    train_one_run(config, seed, loader, val_loader, feature_dim, args, device, pos_weight)
+                    for config in grid
+                ),
+                key=lambda r: r.best_map,
+            )
+            per_seed.append({
+                "seed": seed,
+                "num_videos": len(subset),
+                "num_samples": len(subset_cache),
+                "best_map": best.best_map,
+                "config": best.config,
+            })
+
+        maps = [entry["best_map"] for entry in per_seed]
+        curve.append({
+            "fraction": fraction,
+            "mean_map": float(np.mean(maps)),
+            "std_map": float(np.std(maps, ddof=1)) if len(maps) > 1 else 0.0,
+            "mean_videos": float(np.mean([e["num_videos"] for e in per_seed])),
+            "mean_samples": float(np.mean([e["num_samples"] for e in per_seed])),
+            "per_seed": per_seed,
+        })
+        print(f"  fraction {fraction:>5.2f}  videos {curve[-1]['mean_videos']:6.0f}  "
+              f"mAP {curve[-1]['mean_map']:.4f} +/- {curve[-1]['std_map']:.4f}")
+
+    return curve
 
 
 def main() -> int:
@@ -373,29 +483,9 @@ def main() -> int:
     print()
 
     started = time.time()
-    results: list[RunResult] = []
-    for config in grid:
-        for seed in seeds:
-            results.append(
-                train_one_run(config, seed, train_loader, val_loader, feature_dim, args, device, pos_weight)
-            )
+    results = run_search(grid, seeds, train_loader, val_loader, feature_dim, args, device, pos_weight)
 
-    # Select on the mean across seeds, not on the single best run: choosing the
-    # luckiest seed would inflate the reported result and its variance estimate.
-    aggregated: list[dict[str, Any]] = []
-    for config in grid:
-        matching = [r for r in results if r.config == config]
-        maps = [r.best_map for r in matching]
-        aggregated.append(
-            {
-                "config": config,
-                "mean_map": float(np.mean(maps)),
-                "std_map": float(np.std(maps, ddof=1)) if len(maps) > 1 else 0.0,
-                "seeds": {r.seed: r.best_map for r in matching},
-                "best_epochs": [r.best_epoch for r in matching],
-            }
-        )
-    aggregated.sort(key=lambda entry: entry["mean_map"], reverse=True)
+    aggregated = aggregate(results, grid)
     winner = aggregated[0]
 
     output_dir = Path(args.output_dir)
@@ -412,6 +502,15 @@ def main() -> int:
                 logits=logits,
                 targets=getattr(run, "best_targets"),
             )
+
+    curve = None
+    if args.label_fractions:
+        print("\nlearning curve (validation mAP vs fraction of training videos)")
+        curve = learning_curve(
+            train_cache, val_loader, grid, seeds, feature_dim, args, device, pos_weight, precompute
+        )
+        with open(output_dir / "learning_curve.json", "w", encoding="utf-8") as fh:
+            json.dump(curve, fh, indent=2)
 
     summary = {
         "encoder": train_cache.manifest["encoder"],
@@ -431,6 +530,7 @@ def main() -> int:
         },
         "selected": winner,
         "all_configs": aggregated,
+        "learning_curve": curve,
         "elapsed_sec": round(time.time() - started, 1),
     }
     with open(output_dir / "results.json", "w", encoding="utf-8") as fh:
@@ -476,6 +576,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--patience", type=int, default=20, help="0 disables early stopping")
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--pos-weight", action="store_true")
+    p.add_argument(
+        "--label-fractions",
+        type=float,
+        nargs="*",
+        default=None,
+        help="fractions of training VIDEOS for a learning curve, e.g. 0.1 0.25 0.5 1.0",
+    )
     p.add_argument("--in-memory", action="store_true", default=None)
     p.add_argument("--device", default="cuda")
 
