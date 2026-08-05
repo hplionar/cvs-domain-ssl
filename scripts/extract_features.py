@@ -275,12 +275,24 @@ def extract(args: argparse.Namespace) -> int:
     encoder_kwargs: dict[str, Any] = {}
     if args.model_name:
         encoder_kwargs["model_name"] = args.model_name
+    if args.checkpoint:
+        if args.random_init:
+            raise SystemExit("--checkpoint and --random-init are mutually exclusive.")
+        encoder_kwargs["adapted_checkpoint"] = args.checkpoint
     if args.random_init:
         encoder_kwargs["random_init"] = True
         print("WARNING: --random-init uses untrained weights with real architecture "
               "dimensions. Throughput and memory are representative; features are not.",
               file=sys.stderr)
-    encoder = build_encoder(args.encoder, **encoder_kwargs)
+    try:
+        encoder = build_encoder(args.encoder, **encoder_kwargs)
+    except TypeError as exc:
+        if args.checkpoint and "adapted_checkpoint" in str(exc):
+            raise SystemExit(
+                f"Encoder {args.encoder!r} does not support --checkpoint. Only "
+                f"encoders with a continued-pretraining path accept it."
+            ) from exc
+        raise
     encoder = encoder.to(device)
     if not encoder.is_frozen:
         encoder.freeze()
@@ -433,6 +445,13 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--encoder", required=True, help="registry name, e.g. mae_b, videomae_b, vjepa2_l")
     p.add_argument("--model-name", default=None, help="explicit checkpoint id, overriding the variant default")
+    p.add_argument(
+        "--checkpoint",
+        default=None,
+        help="path to an encoder produced by continued pretraining, e.g. "
+        "outputs/ssl/videomae_b_sages/encoder_final.pt. This is the adapted arm; "
+        "without it the encoder is the published baseline checkpoint",
+    )
     p.add_argument("--dataset", default="endoscapes", choices=sorted(DATASET_KEYS))
     p.add_argument("--split", default="train", choices=["train", "val", "test"])
     p.add_argument("--dataset-root", default=None)

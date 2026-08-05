@@ -1,0 +1,58 @@
+# V-JEPA 2 ViT-L continued pretraining on SAGES — experiment E2.2.
+#
+# The latent-prediction counterpart to configs/ssl/videomae_b_sages.yaml. Clip
+# geometry, corpus, budget and schedule are held identical to that arm so that
+# the objective is the only difference between them.
+#
+# ViT-L rather than ViT-B: the V-JEPA 2 ViT-B checkpoint is a distilled student
+# of ViT-g, whereas ViT-L is natively pretrained under the JEPA objective.
+# Resuming the objective on a distilled student is not the same operation. See
+# docs/experimental_design.md §5.
+
+seed: 0
+output_dir: /group/pmc085/hlionar/outputs/cvs-domain-ssl/ssl/vjepa2_l_sages
+
+model:
+  checkpoint: facebook/vjepa2-vitl-fpc64-256
+  # ViT-L is 326M parameters against VideoMAE ViT-B's 86M; gradient
+  # checkpointing trades compute for the memory to fit a useful batch on a
+  # 32 GiB V100.
+  gradient_checkpointing: true
+
+data:
+  video_dir: /group/pmc085/hlionar/datasets/SAGES_CVS_Challenge_2024/train/videos
+  num_frames: 16
+  stride: 4
+  clips_per_video: 40
+  image_size: 224
+  crop_scale: [0.5, 1.0]
+  decode_size: 256
+  reader_cache_size: 4
+  augment: true
+  exclude_video_ids: []
+
+train:
+  batch_size: 4
+  epochs: 20
+  lr: 1.0e-4
+  min_lr_ratio: 0.01
+  weight_decay: 0.04
+  betas: [0.9, 0.95]
+  grad_clip: 1.0
+  warmup_steps: 2000
+
+  # Masking: 8 blocks at 15-20% of the spatial grid each, unioned and spanning
+  # the temporal axis. Yields roughly 60-70% masked, comparable to V-JEPA's
+  # published multi-block configuration.
+  num_blocks: 8
+  block_scale: [0.15, 0.2]
+
+  # EMA momentum rises to 1.0 on a cosine schedule. A faster teacher early lets
+  # the target track the student while both move quickly; a near-frozen teacher
+  # later stabilises the objective.
+  ema_momentum: 0.998
+
+  num_workers: 8
+  prefetch_factor: 4
+  save_every_steps: 500
+  log_every_steps: 20

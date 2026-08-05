@@ -135,6 +135,11 @@ class CachedFeatures(Dataset):
     def unique_video_ids(self) -> list[str]:
         return sorted({self.video_ids[i] for i in self.rows})
 
+    #: Target size of one decoded block while pooling, in bytes. Peak is roughly
+    #: 1.5x this, since the fp16 block read from the memmap and its fp32 copy are
+    #: briefly alive together.
+    POOL_BLOCK_BYTES: int = 1 << 30  # 1 GiB
+
     def pooled(self) -> torch.Tensor:
         """Mean over tokens, computed once.
 
@@ -142,10 +147,19 @@ class CachedFeatures(Dataset):
         not depend on any parameter, so doing it per epoch is wasted work.
         Precomputing is mathematically identical and turns a 1568-token cache
         into a single vector per sample.
+
+        The block size is derived from the cache geometry rather than fixed at a
+        sample count. A count that is comfortable for a 197-token image cache is
+        not comfortable for a 1568-token video cache: 4096 video samples decode
+        to roughly 20 GB in fp32, so a fixed count fails on exactly the cache the
+        video arms depend on.
         """
+        bytes_per_sample = max(self.num_tokens * self.feature_dim * 4, 1)
+        block_size = max(1, int(self.POOL_BLOCK_BYTES // bytes_per_sample))
+
         chunks = []
-        for start in range(0, len(self), 4096):
-            rows = self.rows[start : start + 4096]
+        for start in range(0, len(self), block_size):
+            rows = self.rows[start : start + block_size]
             block = np.asarray(self.tokens[rows], dtype=np.float32)
             chunks.append(torch.from_numpy(block).mean(dim=1))
         return torch.cat(chunks, dim=0)
@@ -389,45 +403,66 @@ def learning_curve(
 ) -> list[dict[str, Any]]:
     """Validation mAP against fraction of labelled training videos.
 
-    Hyperparameters are re-searched at every fraction. A configuration tuned on
-    the full training set is not necessarily appropriate at 10% of it, and
-    carrying one over would confound the effect of data quantity with a
-    regularisation mismatch.
+    Hyperparameters are re-searched at every fraction, then selected on the
+    **mean across seeds** rather than by taking the single best run.
+
+    Selecting the maximum over the grid would bias every point upward, because
+    the maximum of several noisy estimates exceeds the mean of the underlying
+    quantities. The bias grows with the variance of those estimates, and
+    variance is largest at small training fractions — so the curve would be
+    inflated most at exactly the end where an advantage for the adapted encoder
+    is being claimed. The apparent low-label benefit would then be partly an
+    artefact of the selection rule rather than a property of the representation.
+
+    Selecting on the seed mean matches how the main search reports its result,
+    so the two are directly comparable.
     """
     all_videos = train_cache.unique_video_ids()
     curve = []
 
     for fraction in args.label_fractions:
-        per_seed = []
+        # Every configuration is run for every seed at this fraction, so the
+        # winner can be chosen on the seed mean rather than on a single run.
+        results: list[RunResult] = []
+        subset_sizes: dict[int, tuple[int, int]] = {}
+
         for seed in seeds:
             subset = sample_videos(all_videos, fraction, seed)
             subset_cache = CachedFeatures(train_cache.directory, video_ids=subset)
+            subset_sizes[seed] = (len(subset), len(subset_cache))
             if precompute:
                 subset_ds: Dataset = PooledFeatures(subset_cache.pooled(), subset_cache.all_targets())
             else:
                 subset_ds = subset_cache
             loader = DataLoader(subset_ds, batch_size=args.batch_size, shuffle=True, num_workers=0)
 
-            best = max(
-                (
-                    train_one_run(config, seed, loader, val_loader, feature_dim, args, device, pos_weight)
-                    for config in grid
-                ),
-                key=lambda r: r.best_map,
+            results.extend(
+                train_one_run(config, seed, loader, val_loader, feature_dim,
+                              args, device, pos_weight)
+                for config in grid
             )
-            per_seed.append({
-                "seed": seed,
-                "num_videos": len(subset),
-                "num_samples": len(subset_cache),
-                "best_map": best.best_map,
-                "config": best.config,
-            })
+
+        ranked = aggregate(results, grid)
+        winner = ranked[0]["config"]
+
+        per_seed = [
+            {
+                "seed": run.seed,
+                "num_videos": subset_sizes[run.seed][0],
+                "num_samples": subset_sizes[run.seed][1],
+                "best_map": run.best_map,
+                "config": run.config,
+            }
+            for run in results
+            if run.config == winner
+        ]
 
         maps = [entry["best_map"] for entry in per_seed]
         curve.append({
             "fraction": fraction,
             "mean_map": float(np.mean(maps)),
             "std_map": float(np.std(maps, ddof=1)) if len(maps) > 1 else 0.0,
+            "selected_config": winner,
             "mean_videos": float(np.mean([e["num_videos"] for e in per_seed])),
             "mean_samples": float(np.mean([e["num_samples"] for e in per_seed])),
             "per_seed": per_seed,

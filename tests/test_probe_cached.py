@@ -251,3 +251,54 @@ def test_seed_variance_is_reported(tmp_path):
     out = _run(tmp_path)
     results = json.loads((out / "results.json").read_text())
     assert "std_map" in results["selected"]
+
+
+# -- learning-curve selection ---------------------------------------------
+
+
+def test_learning_curve_selects_on_seed_mean_not_best_run(tmp_path, monkeypatch):
+    """Selecting the maximum over the grid biases every point upward, because
+    the maximum of several noisy estimates exceeds the mean of the underlying
+    quantities. The bias grows with variance, and variance is largest at small
+    training fractions -- so the curve would be inflated most at exactly the end
+    where an advantage for the adapted encoder is being claimed."""
+    import argparse
+
+    from train.train_probe_cached import RunResult, aggregate
+
+    grid = [{"lr": 1e-3}, {"lr": 3e-3}]
+
+    # Config A is better on average; config B has one lucky seed that is the
+    # single highest number present.
+    results = [
+        RunResult(config=grid[0], seed=0, best_epoch=1, best_map=0.50, best_metrics={}),
+        RunResult(config=grid[0], seed=1, best_epoch=1, best_map=0.52, best_metrics={}),
+        RunResult(config=grid[1], seed=0, best_epoch=1, best_map=0.61, best_metrics={}),
+        RunResult(config=grid[1], seed=1, best_epoch=1, best_map=0.30, best_metrics={}),
+    ]
+
+    ranked = aggregate(results, grid)
+    assert ranked[0]["config"] == grid[0], "should prefer the better mean"
+    assert ranked[0]["mean_map"] == pytest.approx(0.51)
+
+    lucky = max(results, key=lambda r: r.best_map)
+    assert lucky.config == grid[1]
+    assert lucky.best_map > ranked[0]["mean_map"], (
+        "the single best run exceeds the selected mean; selecting on it would "
+        "inflate the reported point"
+    )
+
+
+def test_learning_curve_records_the_selected_config(tmp_path):
+    """The curve must show which configuration produced each point, so a reader
+    can tell whether the shape reflects data quantity or a changing recipe."""
+    import inspect
+
+    from train.train_probe_cached import learning_curve
+
+    source = inspect.getsource(learning_curve)
+    assert "aggregate(" in source, "selection should go through aggregate()"
+    assert "selected_config" in source
+    assert "key=lambda r: r.best_map" not in source, (
+        "max-over-grid selection reintroduces the upward bias"
+    )

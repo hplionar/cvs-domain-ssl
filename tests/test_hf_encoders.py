@@ -273,3 +273,78 @@ def test_repair_status_recorded_in_describe(videomae):
     """The cache manifest must show whether the repair ran, so that two arms
     cannot silently differ in whether their weights were correct."""
     assert "qkv_bias_repair" in videomae.describe()
+
+
+# -- adapted checkpoint loading -------------------------------------------
+#
+# The route from pretraining to evaluation. Without it an adapted encoder
+# cannot be probed, and adaptation gain -- the outcome the whole comparison
+# rests on -- cannot be computed at all.
+
+
+def _base_and_adapted(tmp_path, *, offset=1.0, drop_half=False):
+    """A saved base checkpoint plus a checkpoint shaped like pretraining output."""
+    from transformers import VideoMAEConfig, VideoMAEModel
+
+    cfg = VideoMAEConfig(image_size=224, patch_size=16, num_frames=16,
+                         tubelet_size=2, **TINY)
+    base_dir = tmp_path / "base"
+    VideoMAEModel(cfg).save_pretrained(base_dir)
+
+    reference = VideoMAEModel(cfg).state_dict()
+    adapted = {f"videomae.{k}": v + offset for k, v in reference.items()}
+    if drop_half:
+        adapted = {k: v for i, (k, v) in enumerate(adapted.items()) if i % 2 == 0}
+
+    path = tmp_path / "latest.pt"
+    torch.save({"model": adapted, "step": 500,
+                "config": {"model": {"checkpoint": str(base_dir)}}}, path)
+    return path, base_dir, reference
+
+
+def test_adapted_checkpoint_loads_trained_weights(tmp_path):
+    from models.encoders.videomae_encoder import load_adapted_checkpoint
+
+    path, base_dir, reference = _base_and_adapted(tmp_path, offset=1.0)
+    model, base, record = load_adapted_checkpoint(path, base_checkpoint=str(base_dir))
+
+    loaded = model.state_dict()
+    key = next(k for k in loaded if k.endswith("layernorm_before.weight"))
+    assert torch.allclose(loaded[key], reference[key] + 1.0), "adapted weights not loaded"
+    assert str(base_dir) in str(base)
+
+
+def test_base_checkpoint_read_from_the_training_config(tmp_path):
+    """The training config records which checkpoint the run started from, so the
+    architecture can be reconstructed without the caller repeating it."""
+    from models.encoders.videomae_encoder import load_adapted_checkpoint
+
+    path, base_dir, _ = _base_and_adapted(tmp_path)
+    _, base, _ = load_adapted_checkpoint(path)
+    assert str(base_dir) in str(base)
+
+
+def test_missing_file_is_rejected(tmp_path):
+    from models.encoders.videomae_encoder import load_adapted_checkpoint
+
+    with pytest.raises(FileNotFoundError):
+        load_adapted_checkpoint(tmp_path / "absent.pt")
+
+
+def test_wrong_payload_shape_is_rejected(tmp_path):
+    from models.encoders.videomae_encoder import load_adapted_checkpoint
+
+    path = tmp_path / "bad.pt"
+    torch.save({"not_a_model": 1}, path)
+    with pytest.raises(ValueError, match="does not look like a checkpoint"):
+        load_adapted_checkpoint(path)
+
+
+def test_missing_encoder_keys_are_fatal(tmp_path):
+    """A partial state dict would leave freshly initialised weights in the
+    encoder, which is precisely the failure this path exists to prevent."""
+    from models.encoders.videomae_encoder import load_adapted_checkpoint
+
+    path, base_dir, _ = _base_and_adapted(tmp_path, drop_half=True)
+    with pytest.raises((RuntimeError, ValueError)):
+        load_adapted_checkpoint(path, base_checkpoint=str(base_dir))
