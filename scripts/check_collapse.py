@@ -42,23 +42,41 @@ import numpy as np
 import torch
 
 
+def _participation_ratio(matrix: torch.Tensor) -> float:
+    """``(sum e)^2 / sum(e^2)`` over eigenvalues: the number of directions
+    carrying appreciable weight, rather than the number that are merely
+    non-zero."""
+    eigenvalues = torch.linalg.eigvalsh(matrix).clamp(min=0)
+    total = eigenvalues.sum()
+    return (total**2 / (eigenvalues**2).sum()).item() if total > 0 else 0.0
+
+
 def feature_statistics(tokens: torch.Tensor) -> dict[str, float]:
     """Statistics on ``[N, D]`` patch tokens pooled across clips."""
     tokens = tokens.float()
 
     variance = tokens.var(dim=0).mean().item()
 
-    # Uncentred second moment, not the covariance. Collapse to a constant
-    # vector is rank one in the uncentred sense, but centring subtracts exactly
-    # that constant and leaves isotropic noise reading as full rank — so a
-    # covariance-based effective rank cannot see the failure it is meant to
-    # detect.
-    second_moment = (tokens.T @ tokens) / max(len(tokens), 1)
-    eigenvalues = torch.linalg.eigvalsh(second_moment).clamp(min=0)
-    total = eigenvalues.sum()
-    effective_rank = (
-        (total**2 / (eigenvalues**2).sum()).item() if total > 0 else 0.0
-    )
+    # Both ranks are reported because they answer different questions and
+    # disagree substantially in practice.
+    #
+    # Uncentred detects *collapse*: mapping every patch to one constant vector
+    # is rank one in this sense. Centring would subtract exactly that constant
+    # and leave isotropic noise reading as full rank, so a covariance-based
+    # measure cannot see the failure this script exists to catch.
+    #
+    # Centred describes *how much the representation varies*, which is the
+    # quantity meant by "the encoder uses N of its D dimensions". A large shared
+    # offset across patches dominates the uncentred spectrum and drags that
+    # figure down even where variation is high-dimensional: VideoMAE ViT-B on
+    # surgical video measures 2.6 uncentred against 31.9 centred. Reading the
+    # uncentred number as capacity usage understates it by an order of
+    # magnitude.
+    effective_rank = _participation_ratio((tokens.T @ tokens) / max(len(tokens), 1))
+
+    centred = tokens - tokens.mean(dim=0, keepdim=True)
+    covariance = (centred.T @ centred) / max(len(centred) - 1, 1)
+    centred_rank = _participation_ratio(covariance)
 
     normalised = torch.nn.functional.normalize(tokens, dim=1)
     sample = normalised[torch.randperm(len(normalised))[:512]]
@@ -68,6 +86,8 @@ def feature_statistics(tokens: torch.Tensor) -> dict[str, float]:
     return {
         "mean_variance": variance,
         "effective_rank": effective_rank,
+        "centred_rank": centred_rank,
+        "centred_rank_fraction": centred_rank / tokens.shape[1],
         "dimensions": tokens.shape[1],
         "rank_fraction": effective_rank / tokens.shape[1],
         "mean_pairwise_cosine": off_diagonal.mean().item(),
@@ -95,6 +115,13 @@ def verdict(before: dict[str, float], after: dict[str, float]) -> tuple[str, lis
         problems.append(
             f"patches are near-identical (mean cosine "
             f"{after['mean_pairwise_cosine']:.3f})"
+        )
+    centred_ratio = after["centred_rank"] / max(before["centred_rank"], 1e-12)
+    if centred_ratio < 0.5:
+        problems.append(
+            f"centred rank fell to {centred_ratio:.1%} of the original "
+            f"({before['centred_rank']:.1f} -> {after['centred_rank']:.1f}); "
+            f"the representation lost variation, not just scale"
         )
     if after["rank_fraction"] < 0.01:
         problems.append(
@@ -165,12 +192,19 @@ def main() -> int:
     after = feature_statistics(encode(trained, clips, device))
 
     print(f"  {'measure':<26} {'before':>12} {'after':>12} {'ratio':>8}")
-    for key in ("mean_variance", "effective_rank", "mean_pairwise_cosine", "feature_norm"):
+    for key in ("mean_variance", "effective_rank", "centred_rank",
+                "mean_pairwise_cosine", "feature_norm"):
         ratio = after[key] / before[key] if before[key] else float("nan")
         print(f"  {key:<26} {before[key]:12.4f} {after[key]:12.4f} {ratio:8.3f}")
-    print(f"  {'rank / dimensions':<26} "
+    print(f"  {'uncentred / dims':<26} "
           f"{before['effective_rank']:6.1f}/{before['dimensions']:<5d} "
           f"{after['effective_rank']:6.1f}/{after['dimensions']:<5d}")
+    print(f"  {'centred / dims':<26} "
+          f"{before['centred_rank']:6.1f}/{before['dimensions']:<5d} "
+          f"{after['centred_rank']:6.1f}/{after['dimensions']:<5d}")
+    print("\n  uncentred rank detects collapse to a constant; centred rank "
+          "describes how much\n  the representation varies. Quote the centred "
+          "figure for capacity usage.")
 
     status, problems = verdict(before, after)
     print(f"\n  verdict: {status}")
