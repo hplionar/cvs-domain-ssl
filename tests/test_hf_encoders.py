@@ -202,3 +202,74 @@ def test_registry_exposes_all_wrappers():
 def test_unknown_variant_is_rejected():
     with pytest.raises(ValueError, match="Unknown variant"):
         VideoMAEEncoder(variant="enormous")
+
+
+# -- VideoMAE attention bias repair (transformers 5.x regression) ---------
+
+
+def test_repair_maps_q_and_v_bias_and_zeros_key(monkeypatch, tmp_path):
+    """VideoMAE checkpoints store q_bias/v_bias; transformers 5.x expects
+    query/key/value.bias and provides no conversion, so trained biases are
+    silently replaced with newly initialised ones."""
+    import torch
+    from safetensors.torch import save_file
+
+    from transformers import VideoMAEConfig, VideoMAEModel
+    from models.encoders.videomae_encoder import repair_qkv_bias
+
+    cfg = VideoMAEConfig(image_size=224, patch_size=16, num_frames=16,
+                         tubelet_size=2, qkv_bias=True, **TINY)
+    model = VideoMAEModel(cfg)
+
+    dim = cfg.hidden_size
+    q = torch.full((dim,), 0.25)
+    v = torch.full((dim,), -0.5)
+    path = tmp_path / "model.safetensors"
+    save_file({
+        "videomae.encoder.layer.0.attention.attention.q_bias": q,
+        "videomae.encoder.layer.0.attention.attention.v_bias": v,
+    }, str(path))
+
+    monkeypatch.setattr(
+        "huggingface_hub.hf_hub_download", lambda *a, **k: str(path)
+    )
+
+    with torch.no_grad():  # start from values that are definitely wrong
+        model.encoder.layer[0].attention.attention.query.bias.fill_(9.0)
+        model.encoder.layer[0].attention.attention.value.bias.fill_(9.0)
+        model.encoder.layer[0].attention.attention.key.bias.fill_(9.0)
+
+    record = repair_qkv_bias(model, "MCG-NJU/videomae-base")
+
+    assert record["status"] == "repaired"
+    assert record["num_repaired"] == 2
+    assert record["num_unmapped"] == 0
+
+    attn = model.encoder.layer[0].attention.attention
+    assert torch.allclose(attn.query.bias, q)
+    assert torch.allclose(attn.value.bias, v)
+    assert torch.allclose(attn.key.bias, torch.zeros(dim)), \
+        "the original implementation fixes key bias at zero"
+
+
+def test_repair_is_a_no_op_for_modern_checkpoints(monkeypatch, tmp_path):
+    import torch
+    from safetensors.torch import save_file
+    from transformers import VideoMAEConfig, VideoMAEModel
+    from models.encoders.videomae_encoder import repair_qkv_bias
+
+    cfg = VideoMAEConfig(image_size=224, patch_size=16, num_frames=16,
+                         tubelet_size=2, **TINY)
+    model = VideoMAEModel(cfg)
+    path = tmp_path / "model.safetensors"
+    save_file({"encoder.layer.0.attention.attention.query.bias":
+               torch.zeros(cfg.hidden_size)}, str(path))
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", lambda *a, **k: str(path))
+
+    assert repair_qkv_bias(model, "some/checkpoint")["status"] == "not_needed"
+
+
+def test_repair_status_recorded_in_describe(videomae):
+    """The cache manifest must show whether the repair ran, so that two arms
+    cannot silently differ in whether their weights were correct."""
+    assert "qkv_bias_repair" in videomae.describe()

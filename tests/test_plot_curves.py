@@ -43,7 +43,7 @@ def write_run(tmp_path, name, *, seeds=3, epochs=10, ragged=False, curve=True, o
             points.append({
                 "fraction": fraction,
                 "mean_map": float(np.mean(maps)),
-                "std_map": float(np.std(maps, ddof=1)),
+                "std_map": float(np.std(maps, ddof=1)) if len(maps) > 1 else 0.0,
                 "mean_videos": 120 * fraction,
                 "mean_samples": 6960 * fraction,
                 "per_seed": [],

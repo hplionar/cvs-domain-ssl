@@ -110,7 +110,14 @@ def stack_metric(histories: dict[int, list[dict[str, Any]]], metric: str) -> tup
     length = min(len(s) for s in series)
     matrix = np.stack([s[:length] for s in series])
     epochs = np.arange(1, length + 1)
-    return epochs, np.nanmean(matrix, axis=0), np.nanstd(matrix, axis=0, ddof=1) if len(series) > 1 else np.zeros(length)
+    # ddof=1 is undefined for a single seed and emits a divide-by-zero warning;
+    # warnings that are routinely ignored are how real ones get missed.
+    spread = (
+        np.nanstd(matrix, axis=0, ddof=1)
+        if matrix.shape[0] > 1
+        else np.zeros(length, dtype=float)
+    )
+    return epochs, np.nanmean(matrix, axis=0), spread
 
 
 # --------------------------------------------------------------------------
