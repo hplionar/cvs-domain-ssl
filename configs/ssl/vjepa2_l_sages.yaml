@@ -1,19 +1,24 @@
-# V-JEPA 2 ViT-L continued pretraining on SAGES — experiment E2.2.
+# V-JEPA 2 ViT-L continued pretraining on SAGES — experiment E2.2
 #
-# The latent-prediction counterpart to configs/ssl/videomae_b_sages.yaml. Clip
-# geometry, corpus, budget and schedule are held identical to that arm so that
-# the objective is the only difference between them.
+# Checkpoint: vjepa2-vitl-fpc16-256-ssv2, chosen because it is the only released
+# V-JEPA 2 variant at 16 frames. The fpc64 checkpoints require 64 frames at
+# 256 px, giving 8192 tokens against VideoMAE's 1568 — roughly 90x the compute
+# per sample and no comparability on temporal extent. At 16 frames and 256 px
+# this gives 8 x 16 x 16 = 2048 tokens, close to VideoMAE's geometry.
 #
-# ViT-L rather than ViT-B: the V-JEPA 2 ViT-B checkpoint is a distilled student
-# of ViT-g, whereas ViT-L is natively pretrained under the JEPA objective.
-# Resuming the objective on a distilled student is not the same operation. See
-# docs/experimental_design.md §5.
+# LIMITATION: the -ssv2 suffix denotes supervised fine-tuning on
+# Something-Something V2. VideoMAE-base is a pure SSL checkpoint, so the two
+# arms are not matched on supervision history. No pure-SSL V-JEPA 2 checkpoint
+# exists at 16 frames. This must be stated in the write-up.
+#
+# Learning rate follows the linear scaling rule at batch 8 (1.5e-4 x 8/256).
+# SSL hyperparameters are otherwise unmodified and are not tuned.
 
 seed: 0
 output_dir: /group/pmc085/hlionar/outputs/cvs-domain-ssl/ssl/vjepa2_l_sages
 
 model:
-  checkpoint: facebook/vjepa2-vitl-fpc64-256
+  checkpoint: facebook/vjepa2-vitl-fpc16-256-ssv2
   # ViT-L is 326M parameters against VideoMAE ViT-B's 86M; gradient
   # checkpointing trades compute for the memory to fit a useful batch on a
   # 32 GiB V100.
@@ -24,22 +29,22 @@ data:
   num_frames: 16
   stride: 4
   clips_per_video: 40
-  image_size: 224
+  image_size: 256
   crop_scale: [0.5, 1.0]
-  decode_size: 256
+  decode_size: 288
   reader_cache_size: 4
   augment: true
   exclude_video_ids: []
 
 train:
-  batch_size: 4
+  batch_size: 8
   epochs: 20
-  lr: 1.0e-4
+  lr: 4.7e-6
   min_lr_ratio: 0.01
   weight_decay: 0.04
   betas: [0.9, 0.95]
   grad_clip: 1.0
-  warmup_steps: 2000
+  warmup_steps: 875
 
   # Masking: 8 blocks at 15-20% of the spatial grid each, unioned and spanning
   # the temporal axis. Yields roughly 60-70% masked, comparable to V-JEPA's
@@ -52,7 +57,7 @@ train:
   # later stabilises the objective.
   ema_momentum: 0.998
 
-  num_workers: 8
+  num_workers: 24
   prefetch_factor: 4
-  save_every_steps: 500
+  save_every_steps: 200
   log_every_steps: 20
