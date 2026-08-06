@@ -1,9 +1,38 @@
+"""DINOv2 image encoders. Two of them, for different pipelines.
+
+``DINOv2Encoder`` (legacy)
+    torch.hub wrapper returning a pooled ``[B, D]`` vector. It is *not* a
+    ``BaseEncoder`` and is not in the registry. ``train/train_cvs.py``,
+    ``train/train_cvs_clip_meanpool.py`` and both scripts in ``eval/`` import it
+    directly, and exp001-exp006 were produced through it, so it is kept exactly
+    as it was. Pooling inside the encoder is irreversible, so it cannot feed any
+    head in ``models/heads/``.
+
+``DINOv2ViTEncoder``
+    ``BaseEncoder`` returning a ``[B, N, D]`` token grid with the ``[CLS]`` token
+    separated into ``prefix``. This is the one the cached-probe path uses.
+    Registered as ``dinov2_s``, ``dinov2_b``, ``dinov2_l``.
+
+The weights are **not gated**: ``facebook/dinov2-base`` downloads without a
+token or an access request, unlike the DINOv3 family.
+"""
+
 from __future__ import annotations
 
 from typing import Literal
 
 import torch
 import torch.nn as nn
+
+from models.encoders import register_encoder
+from models.encoders.base_encoder import BaseEncoder, EncoderOutput, PreprocessSpec, TokenLayout
+from models.encoders.hf_common import (
+    cfg_get,
+    image_spec,
+    require_transformers,
+    spatial_grid,
+    vit_dims,
+)
 
 
 DINO_MODEL_NAMES = {
@@ -74,3 +103,190 @@ class DINOv2Encoder(nn.Module):
             )
 
         return output
+
+# ---------------------------------------------------------------------------
+# BaseEncoder wrapper: token grids for the cached-probe path
+# ---------------------------------------------------------------------------
+
+
+class DINOv2ViTEncoder(BaseEncoder):
+    """DINOv2 ViT returning patch tokens with ``[CLS]`` separated.
+
+    Self-distillation, image level, and **ungated** -- which is the practical
+    reason it exists alongside ``dinov3_*``: the DINOv3 checkpoints sit behind a
+    manual access review, and a frozen-feature head comparison does not need to
+    wait for one. Both families are self-distilled, so both give a ``[CLS]``
+    token that carries a real global summary rather than the near-empty one a
+    reconstruction objective produces.
+
+    Resolution
+    ----------
+    ``image_size`` is a constructor argument here, not read from the checkpoint
+    config as it is for DINOv3. The released config declares 518, which at
+    patch 14 is a 37x37 grid: 1369 tokens per image, seven times the cache and
+    the compute, at a resolution nothing else in this project uses. DINOv2
+    interpolates its position encodings for any input size, so 224 is a valid
+    input and yields a 16x16 grid.
+
+    That interpolation is silent, so the guard below is the only thing standing
+    between a mistyped resolution and a cache built at the wrong geometry.
+    ``image_size`` must be divisible by the patch size, which for the /14
+    checkpoints excludes some otherwise natural choices -- 256 is not a multiple
+    of 14, 224 and 252 are.
+
+    Register tokens
+    ---------------
+    The original DINOv2 release has none, so ``prefix`` is a single ``[CLS]``.
+    ``facebook/dinov2-with-registers-*`` is a separate checkpoint family that has
+    four, and loading one under an assumption of zero would shift every patch
+    token by four positions without raising anything. So the count is not
+    assumed -- but neither is it read from the config, because the config lies:
+
+        >>> cfg = Dinov2Config(num_register_tokens=4)   # accepted
+        >>> Dinov2Model(cfg)(pixel_values=x).last_hidden_state.shape[1]
+        257                                             # 256 patches + 1 CLS
+
+    ``Dinov2Config`` stores the field, ``Dinov2Model`` has no ``register_tokens``
+    parameter and ignores it. Only ``Dinov2WithRegistersModel`` implements them.
+    The count is therefore taken from the *architecture* -- whether the
+    embedding module actually owns register tokens -- and the config is
+    consulted only once that is established. ``AutoModel`` picks the right class
+    per checkpoint, so both families load correctly by name.
+
+    The shape check in ``_forward_tokens`` is the backstop for all of this, and
+    is what caught the config-lies case in the first place.
+    """
+
+    modality = "image"
+
+    CHECKPOINTS = {
+        "small": "facebook/dinov2-small",
+        "base": "facebook/dinov2-base",
+        "large": "facebook/dinov2-large",
+        "giant": "facebook/dinov2-giant",
+    }
+
+    #: Resolution used across this project. Not the checkpoint's declared 518.
+    DEFAULT_IMAGE_SIZE = 224
+
+    def __init__(
+        self,
+        variant: str = "base",
+        *,
+        image_size: int | None = None,
+        model_name: str | None = None,
+        model=None,
+        random_init: bool = False,
+        freeze: bool = True,
+    ) -> None:
+        super().__init__(freeze=freeze)
+
+        if model is None and random_init:
+            require_transformers()
+            from transformers import Dinov2Config, Dinov2Model
+
+            model = Dinov2Model(
+                Dinov2Config(image_size=518, patch_size=14, **vit_dims(variant))
+            )
+            model_name = f"random-init-{variant}"
+
+        if model is None:
+            require_transformers()
+            from transformers import AutoModel
+
+            if model_name is None:
+                if variant not in self.CHECKPOINTS:
+                    raise ValueError(
+                        f"Unknown variant {variant!r}. Available: {sorted(self.CHECKPOINTS)}"
+                    )
+                model_name = self.CHECKPOINTS[variant]
+            # AutoModel rather than Dinov2Model: the with-registers checkpoints
+            # need Dinov2WithRegistersModel, and loading them through
+            # Dinov2Model would drop the register weights silently.
+            model = AutoModel.from_pretrained(model_name)
+
+        self.model = model
+        self._model_name = model_name or "from-config"
+
+        cfg = model.config
+        patch_size = int(cfg_get(cfg, "patch_size"))
+        size = int(self.DEFAULT_IMAGE_SIZE if image_size is None else image_size)
+        if size % patch_size != 0:
+            raise ValueError(
+                f"image_size {size} is not divisible by DINOv2's patch size "
+                f"{patch_size}. The model would interpolate its position "
+                f"encodings and return a token count that does not match the "
+                f"declared grid. Use a multiple of {patch_size}: "
+                f"{patch_size * (size // patch_size)} or "
+                f"{patch_size * (size // patch_size + 1)}."
+            )
+        h, w = spatial_grid(size, patch_size)
+
+        # Architecture first, config second. Dinov2Config accepts and stores
+        # num_register_tokens that Dinov2Model does not implement, so trusting
+        # the config alone declares a prefix the model never emits and every
+        # patch token lands four positions out.
+        embeddings = getattr(model, "embeddings", None)
+        has_registers = getattr(embeddings, "register_tokens", None) is not None
+        num_registers = (
+            int(cfg_get(cfg, "num_register_tokens", default=0, required=False) or 0)
+            if has_registers
+            else 0
+        )
+        self._num_registers = num_registers
+
+        self._spec = image_spec(size)
+        self._layout = TokenLayout(
+            grid=(h, w),
+            dim=int(cfg_get(cfg, "hidden_size")),
+            num_prefix_tokens=1 + num_registers,
+        )
+        self._finalise_init()
+
+    @property
+    def preprocess_spec(self) -> PreprocessSpec:
+        return self._spec
+
+    @property
+    def token_layout(self) -> TokenLayout:
+        return self._layout
+
+    @property
+    def checkpoint_id(self) -> str:
+        return f"{self._model_name}@{self._spec.image_size}"
+
+    @property
+    def num_register_tokens(self) -> int:
+        return self._num_registers
+
+    def _forward_tokens(self, x: torch.Tensor) -> EncoderOutput:
+        hidden = self.model(pixel_values=x).last_hidden_state
+        n_prefix = self._layout.num_prefix_tokens
+        expected = self._layout.num_tokens + n_prefix
+        if hidden.shape[1] != expected:
+            raise RuntimeError(
+                f"DINOv2 returned {hidden.shape[1]} tokens, expected {expected} "
+                f"({n_prefix} prefix + {self._layout.num_tokens} patch). Position "
+                f"encodings are interpolated silently, so this means the input "
+                f"resolution or the register count disagrees with the declared "
+                f"layout; patch tokens would be misaligned."
+            )
+        return EncoderOutput(tokens=hidden[:, n_prefix:, :], prefix=hidden[:, :n_prefix, :])
+
+
+@register_encoder("dinov2_s")
+def _dinov2_s(**kwargs) -> DINOv2ViTEncoder:
+    return DINOv2ViTEncoder(variant="small", **kwargs)
+
+
+@register_encoder("dinov2_b")
+def _dinov2_b(**kwargs) -> DINOv2ViTEncoder:
+    return DINOv2ViTEncoder(variant="base", **kwargs)
+
+
+@register_encoder("dinov2_l")
+def _dinov2_l(**kwargs) -> DINOv2ViTEncoder:
+    return DINOv2ViTEncoder(variant="large", **kwargs)
+
+
+__all__ = ["DINO_MODEL_NAMES", "DINOv2Encoder", "DINOv2ViTEncoder"]

@@ -30,18 +30,29 @@
 #
 # ENCODER CHOICE. The fusion head's global branch needs a [CLS] token, so the
 # encoder must emit prefix tokens and the cache must have been extracted with
-# --reduction none. In this repository that means dinov3_s/dinov3_b or
-# mae_b/mae_l; VideoMAE and V-JEPA 2 return prefix=None. There is no DINOv2
-# entry in the BaseEncoder registry -- models/encoders/dinov2_encoder.py is a
-# legacy wrapper returning a pooled [B, D] vector that cannot feed any head in
-# models/heads/.
+# --reduction none. In this repository that means dinov2_s/b/l, dinov3_s/b, or
+# mae_b/mae_l; VideoMAE and V-JEPA 2 return prefix=None.
 #
-# dinov3_b is the default rather than mae_b because SMIL's h_ctx is a
-# self-distilled [CLS] token. ViT-MAE is trained with no CLS objective, and the
-# standard MAE linear-probe protocol pools patch tokens precisely because that
-# token carries little on its own. Testing a fusion design on an encoder whose
-# global token is near-empty answers a different question. Run mae_b afterwards
-# to find out how much of the result depends on that.
+# Note dinov2_* resolves to DINOv2ViTEncoder, the BaseEncoder wrapper. The class
+# named DINOv2Encoder in the same module is the legacy torch.hub wrapper that
+# returns a pooled [B, D] vector and cannot feed any head in models/heads/;
+# train_cvs.py and the eval scripts still use it for exp001-exp006.
+#
+# dinov2_b is the default because it is ungated and self-distilled. SMIL's h_ctx
+# is a self-distilled [CLS] token, so what the global branch needs is an encoder
+# whose [CLS] is a real global summary. ViT-MAE is trained with no CLS objective
+# at all, and the standard MAE linear-probe protocol pools patch tokens
+# precisely because that token carries little alone -- a null result on mae_b
+# would not distinguish "fusion does not help" from "this encoder has no usable
+# [CLS]". Run mae_b as a contrast, not as the primary arm.
+#
+# dinov3_b is the stronger self-distilled option and sits behind a manual access
+# review on HuggingFace. Use it once approved; the head comparison does not need
+# to wait for it, and DINOv2 answers the same question.
+#
+# SMIL itself uses neither: ViT-B/16 initialised from Endo-FM, then DINO
+# self-distillation (paper p. 4, Implementation details). The encoder here is a
+# held-constant control, not a reproduction target.
 #
 # Usage:
 #   sbatch scripts/run_head_comparison.sbatch
@@ -55,7 +66,7 @@ set -euo pipefail
 REPO="${REPO:-/group/pmc085/hlionar/cvs-domain-ssl}"
 ENV="${ENV:-/group/pmc085/hlionar/conda_envs/cvsssl}"
 
-ENCODER="${ENCODER:-dinov3_b}"
+ENCODER="${ENCODER:-dinov2_b}"
 DATASET="${DATASET:-endoscapes}"
 CACHE_ROOT="${CACHE_ROOT:-/group/pmc085/hlionar/cache}"
 OUT_ROOT="${OUT_ROOT:-/group/pmc085/hlionar/outputs/cvs-domain-ssl/head_comparison}"

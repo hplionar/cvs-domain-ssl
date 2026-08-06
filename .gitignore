@@ -32,3 +32,11 @@ features/
 .DS_Store
 Thumbs.db
 configs/data/paths.local.yaml
+
+# Scratch notes, not part of the record
+docs/note_scratch.md
+docs/scratch/
+*.scratch.md
+
+# WSL/Windows download artefacts
+*:Zone.Identifier

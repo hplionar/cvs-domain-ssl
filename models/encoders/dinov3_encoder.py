@@ -11,7 +11,19 @@ over the grid. The register count is read from the loaded checkpoint config
 rather than the class default, which is zero and does not match the released
 weights.
 
-The weights are gated. ``huggingface-cli login`` is required before first use.
+The weights are gated, which needs two separate things before first use:
+
+1. Access granted on the model page, while signed in to the account whose token
+   you will use. Without it the download fails 403 even when authenticated.
+2. ``hf auth login`` in the shell. ``huggingface-cli login`` is a no-op stub
+   from huggingface_hub 1.x onward: it prints a deprecation hint, exits zero,
+   and authenticates nothing, so the next call fails 401 as though no attempt
+   had been made.
+
+Export ``HF_HOME`` *before* logging in if the token must be visible to a batch
+job. The token is written under ``$HF_HOME``, so logging in with the variable
+unset stores it in ``~/.cache/huggingface``, where a job that points ``HF_HOME``
+at project storage will not find it.
 """
 
 from __future__ import annotations
