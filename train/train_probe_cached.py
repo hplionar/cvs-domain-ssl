@@ -2,9 +2,9 @@
 """Train a CVS probe on cached encoder features.
 
 Reads the memory-mapped fp16 caches written by ``scripts/extract_features.py``
-and trains either a mean-pooling or an attentive (MIL) head. Because the encoder
-is frozen and its outputs are precomputed, a full grid search with seed
-repetition costs seconds rather than GPU-hours.
+and trains a mean-pooling, attentive (MIL), or two-branch fusion head. Because
+the encoder is frozen and its outputs are precomputed, a full grid search with
+seed repetition costs seconds rather than GPU-hours.
 
 Three protocol rules are enforced here rather than left to discipline:
 
@@ -30,6 +30,14 @@ Usage:
         --val-features   cache/mae_b/endoscapes/val \
         --head mean --seeds 3 \
         --output-dir outputs/probe/mae_b_endoscapes
+
+    # the fusion head needs prefix.npy, so the cache must have been extracted
+    # with --reduction none from an encoder that emits a [CLS] token
+    python train/train_probe_cached.py \
+        --train-features cache/dinov3_b/endoscapes/train \
+        --val-features   cache/dinov3_b/endoscapes/val \
+        --head fusion --global-source cls --seeds 3 \
+        --output-dir outputs/probe/dinov3_b_endoscapes_fusion
 """
 
 from __future__ import annotations
@@ -50,7 +58,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from eval.metrics import compute_multilabel_metrics_from_logits
-from models.heads.attentive_head import build_head
+from models.heads.attentive_head import ATTENTION_HEADS, PREFIX_HEADS, build_head
 
 
 # Default search grid. Applied identically to every arm.
@@ -58,6 +66,20 @@ DEFAULT_GRID = {
     "lr": [1e-4, 3e-4, 1e-3, 3e-3],
     "weight_decay": [0.0, 1e-4, 1e-2],
     "dropout": [0.0, 0.1],
+}
+
+# Searched in addition to DEFAULT_GRID for heads with learned attention, and
+# omitted for the mean head, where it names nothing and would only duplicate
+# every configuration.
+#
+# It is swept rather than fixed because the two attention widths in play come
+# from different sources -- 128 is this project's existing default, 512 is what
+# SMIL states for its MIL module -- and fixing one arm at each value would
+# confound the fusion design with attention capacity. Sweeping both values in
+# both arms and selecting on the seed mean gives each arm the same search
+# effort, which is the same rule the learning-rate grid already follows.
+DEFAULT_ATTENTION_GRID = {
+    "hidden_dim": [128, 512],
 }
 
 # Fields of a cache manifest that must agree for two caches to be comparable.
@@ -102,6 +124,28 @@ class CachedFeatures(Dataset):
         self.tokens = np.load(tokens_path, mmap_mode=None if in_memory else "r")
         self.targets = np.load(self.directory / "targets.npy")
 
+        # Prefix tokens (CLS, and DINOv3 registers) are written by
+        # extract_features.py only when the encoder has them *and* the cache was
+        # extracted with --reduction none. Absence is therefore a legitimate
+        # state, not an error: VideoMAE and V-JEPA 2 have no prefix at all.
+        # Heads that need it must be told which case they are in, and the run
+        # record must show it, so this is surfaced rather than defaulted.
+        prefix_path = self.directory / "prefix.npy"
+        self.prefix = None
+        if prefix_path.is_file():
+            self.prefix = np.load(prefix_path, mmap_mode=None if in_memory else "r")
+            if self.prefix.shape[0] != self.tokens.shape[0]:
+                raise ValueError(
+                    f"prefix.npy has {self.prefix.shape[0]} rows but tokens.npy "
+                    f"has {self.tokens.shape[0]} in {self.directory}. The cache "
+                    f"is inconsistent and must be re-extracted."
+                )
+            if self.prefix.shape[2] != self.tokens.shape[2]:
+                raise ValueError(
+                    f"prefix dim {self.prefix.shape[2]} does not match token dim "
+                    f"{self.tokens.shape[2]} in {self.directory}."
+                )
+
         with open(self.directory / "index.csv", newline="", encoding="utf-8") as fh:
             rows = list(csv.DictReader(fh))
         self.sample_ids = [r["sample_id"] for r in rows]
@@ -119,10 +163,21 @@ class CachedFeatures(Dataset):
     def __len__(self) -> int:
         return int(self.rows.size)
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return ``(tokens, prefix, target)``.
+
+        ``prefix`` is ``[P, D]``, or an empty ``[0, D]`` tensor when the cache
+        has none. An empty tensor rather than ``None`` because the default
+        collate function cannot batch ``None``; the training loop converts a
+        zero-width batch back to ``None`` before calling the head.
+        """
         row = int(self.rows[index])
         tokens = torch.from_numpy(np.asarray(self.tokens[row], dtype=np.float32))
-        return tokens, torch.from_numpy(self.targets[row])
+        if self.prefix is None:
+            prefix = torch.zeros(0, tokens.shape[-1], dtype=torch.float32)
+        else:
+            prefix = torch.from_numpy(np.asarray(self.prefix[row], dtype=np.float32))
+        return tokens, prefix, torch.from_numpy(self.targets[row])
 
     @property
     def feature_dim(self) -> int:
@@ -131,6 +186,14 @@ class CachedFeatures(Dataset):
     @property
     def num_tokens(self) -> int:
         return int(self.tokens.shape[1])
+
+    @property
+    def has_prefix(self) -> bool:
+        return self.prefix is not None
+
+    @property
+    def num_prefix_tokens(self) -> int:
+        return 0 if self.prefix is None else int(self.prefix.shape[1])
 
     def unique_video_ids(self) -> list[str]:
         return sorted({self.video_ids[i] for i in self.rows})
@@ -169,7 +232,12 @@ class CachedFeatures(Dataset):
 
 
 class PooledFeatures(Dataset):
-    """Precomputed pooled vectors, restored to [1, D] so heads see a grid."""
+    """Precomputed pooled vectors, restored to [1, D] so heads see a grid.
+
+    Only used by the mean head, whose pooling is parameter-free. Prefix tokens
+    are irrelevant there and are not carried: the third element is always the
+    empty ``[0, D]`` placeholder, matching ``CachedFeatures.__getitem__``.
+    """
 
     def __init__(self, pooled: torch.Tensor, targets: torch.Tensor) -> None:
         self.pooled = pooled
@@ -178,8 +246,9 @@ class PooledFeatures(Dataset):
     def __len__(self) -> int:
         return self.pooled.shape[0]
 
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.pooled[index].unsqueeze(0), self.targets[index]
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        empty_prefix = torch.zeros(0, self.pooled.shape[-1], dtype=self.pooled.dtype)
+        return self.pooled[index].unsqueeze(0), empty_prefix, self.targets[index]
 
 
 # --------------------------------------------------------------------------
@@ -251,15 +320,43 @@ def compute_pos_weight(targets: torch.Tensor) -> torch.Tensor:
     return negatives / positives.clamp(min=1.0)
 
 
+def _prefix_to_device(prefix: torch.Tensor, device: torch.device) -> torch.Tensor | None:
+    """Convert the empty ``[B, 0, D]`` collate placeholder back to ``None``."""
+    if prefix.ndim != 3 or prefix.shape[1] == 0:
+        return None
+    return prefix.to(device, non_blocking=True)
+
+
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     logits, targets = [], []
-    for tokens, target in loader:
-        out = model(tokens.to(device, non_blocking=True))
+    for tokens, prefix, target in loader:
+        out = model(
+            tokens.to(device, non_blocking=True), _prefix_to_device(prefix, device)
+        )
         logits.append(out.logits.float().cpu().numpy())
         targets.append(target.numpy())
     return np.concatenate(logits), np.concatenate(targets)
+
+
+def build_head_for(
+    config: dict[str, float], feature_dim: int, args: argparse.Namespace
+) -> nn.Module:
+    """One construction site for the head, shared by training and the record.
+
+    ``hidden_dim`` comes from the searched configuration when the head uses
+    attention and is absent from the configuration otherwise, so the mean arm
+    does not silently gain duplicated grid points.
+    """
+    return build_head(
+        args.head,
+        feature_dim,
+        dropout=float(config["dropout"]),
+        hidden_dim=int(config.get("hidden_dim", DEFAULT_ATTENTION_GRID["hidden_dim"][0])),
+        num_branches=args.attn_branches,
+        global_source=args.global_source,
+    )
 
 
 def train_one_run(
@@ -274,13 +371,7 @@ def train_one_run(
 ) -> RunResult:
     set_seed(seed)
 
-    head = build_head(
-        args.head,
-        feature_dim,
-        dropout=float(config["dropout"]),
-        hidden_dim=args.attn_hidden,
-        num_branches=args.attn_branches,
-    ).to(device)
+    head = build_head_for(config, feature_dim, args).to(device)
 
     optimizer = torch.optim.AdamW(
         head.parameters(), lr=float(config["lr"]), weight_decay=float(config["weight_decay"])
@@ -298,10 +389,10 @@ def train_one_run(
     for epoch in range(1, args.epochs + 1):
         head.train()
         total_loss, total_n = 0.0, 0
-        for tokens, target in train_loader:
+        for tokens, prefix, target in train_loader:
             tokens = tokens.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
-            loss = criterion(head(tokens).logits, target)
+            loss = criterion(head(tokens, _prefix_to_device(prefix, device)).logits, target)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
@@ -351,12 +442,23 @@ def sample_videos(video_ids: list[str], fraction: float, seed: int) -> list[str]
     return shuffled[:keep]
 
 
-def build_grid(args: argparse.Namespace) -> list[dict[str, float]]:
+def build_grid(args: argparse.Namespace, *, attention: bool = False) -> list[dict[str, float]]:
+    """Cartesian product of the searched hyperparameters.
+
+    ``attention=True`` adds ``hidden_dim``. It is keyword-only and defaults to
+    off so that the mean arm's grid is unchanged, and so that adding the key
+    cannot happen by accident: an arm whose grid differs in size from another
+    arm's has not received equal search effort.
+    """
     grid = {
         "lr": args.lr or DEFAULT_GRID["lr"],
         "weight_decay": args.weight_decay or DEFAULT_GRID["weight_decay"],
         "dropout": args.dropout or DEFAULT_GRID["dropout"],
     }
+    if attention:
+        grid["hidden_dim"] = (
+            getattr(args, "attn_hidden", None) or DEFAULT_ATTENTION_GRID["hidden_dim"]
+        )
     keys = sorted(grid)
     return [dict(zip(keys, values)) for values in itertools.product(*(grid[k] for k in keys))]
 
@@ -473,6 +575,54 @@ def learning_curve(
     return curve
 
 
+def resolve_global_source(
+    args: argparse.Namespace,
+    train_cache: "CachedFeatures",
+    val_cache: "CachedFeatures",
+) -> str:
+    """Decide once, loudly, where the fusion head's global branch reads from.
+
+    ``auto`` resolves from what the cache actually contains, which is the only
+    place that information exists. The resolved value is printed and written to
+    ``results.json``; the head itself never falls back at runtime, so a run
+    whose global branch came from mean-pooled patches instead of ``[CLS]``
+    cannot be mistaken later for one that used ``[CLS]``.
+    """
+    if args.head not in PREFIX_HEADS:
+        return args.global_source
+
+    if train_cache.has_prefix != val_cache.has_prefix:
+        raise SystemExit(
+            f"Train cache {'has' if train_cache.has_prefix else 'lacks'} prefix "
+            f"tokens but the validation cache "
+            f"{'has' if val_cache.has_prefix else 'lacks'} them. The two splits "
+            f"were not extracted under the same protocol."
+        )
+
+    resolved = args.global_source
+    if resolved == "auto":
+        resolved = "cls" if train_cache.has_prefix else "patch_mean"
+
+    if resolved == "cls" and not train_cache.has_prefix:
+        raise SystemExit(
+            "--global-source cls requires prefix tokens, and this cache has no "
+            "prefix.npy. Either the encoder emits none (VideoMAE, V-JEPA 2), or "
+            "the cache was extracted with --reduction spatial/full, which skips "
+            "prefix.npy and must be re-extracted with --reduction none. To use "
+            "mean-pooled patch tokens as the global branch instead, pass "
+            "--global-source patch_mean explicitly."
+        )
+    if resolved == "patch_mean":
+        print(
+            "NOTE: the fusion head's global branch is mean-pooled patch tokens, "
+            "not [CLS]"
+            + ("" if train_cache.has_prefix else " (this cache has no prefix tokens)")
+            + ". This is a different model from the one SMIL specifies and is "
+            "recorded as such in results.json."
+        )
+    return resolved
+
+
 def main() -> int:
     args = parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -491,6 +641,9 @@ def main() -> int:
     encoder_id = train_cache.manifest["encoder"]["checkpoint_id"]
     feature_dim = train_cache.feature_dim
 
+    uses_attention = args.head in ATTENTION_HEADS
+    args.global_source = resolve_global_source(args, train_cache, val_cache)
+
     # Pooling is parameter-free, so for the mean head it is computed once
     # instead of once per epoch. Mathematically identical, far cheaper.
     precompute = args.head in {"mean", "meanpool", "linear"}
@@ -505,14 +658,16 @@ def main() -> int:
 
     pos_weight = compute_pos_weight(train_cache.all_targets()) if args.pos_weight else None
 
-    grid = build_grid(args)
+    grid = build_grid(args, attention=uses_attention)
     seeds = list(range(args.seed_base, args.seed_base + args.seeds))
 
     print(f"encoder     {encoder_id}")
     print(f"head        {args.head}"
-          + (f" (branches={args.attn_branches})" if not precompute else " [pooling precomputed]"))
+          + (f" (branches={args.attn_branches})" if not precompute else " [pooling precomputed]")
+          + (f" global={args.global_source}" if args.head in PREFIX_HEADS else ""))
     print(f"train/val   {len(train_ds)} / {len(val_ds)} samples"
-          f"  | {train_cache.num_tokens} tokens x {feature_dim} dim")
+          f"  | {train_cache.num_tokens} tokens x {feature_dim} dim"
+          f"  | prefix {train_cache.num_prefix_tokens}")
     print(f"grid        {len(grid)} configs x {len(seeds)} seeds = {len(grid)*len(seeds)} runs")
     print(f"pos_weight  {'on' if pos_weight is not None else 'off'}")
     print()
@@ -553,11 +708,20 @@ def main() -> int:
         "head": {
             "kind": args.head,
             "branches": args.attn_branches,
-            "hidden_dim": args.attn_hidden,
+            "global_source": args.global_source if args.head in PREFIX_HEADS else None,
             "pooling_precomputed": precompute,
+            # Built from the winning configuration so the record describes the
+            # head that produced the reported number, not a nominal default.
+            "selected_head_config": build_head_for(
+                winner["config"], feature_dim, args
+            ).head_config(),
         },
         "search": {
-            "grid": {k: (getattr(args, k) or DEFAULT_GRID[k]) for k in DEFAULT_GRID},
+            "grid": {
+                **{k: (getattr(args, k) or DEFAULT_GRID[k]) for k in DEFAULT_GRID},
+                **({"hidden_dim": args.attn_hidden or DEFAULT_ATTENTION_GRID["hidden_dim"]}
+                   if uses_attention else {}),
+            },
             "seeds": seeds,
             "epochs": args.epochs,
             "patience": args.patience,
@@ -597,9 +761,30 @@ def parse_args() -> argparse.Namespace:
         help="another arm's cache directory; fails if the protocols differ",
     )
 
-    p.add_argument("--head", default="mean", choices=["mean", "meanpool", "linear", "attentive", "attn", "mil", "abmil"])
-    p.add_argument("--attn-hidden", type=int, default=128)
+    p.add_argument(
+        "--head",
+        default="mean",
+        choices=["mean", "meanpool", "linear", "attentive", "attn", "mil", "abmil",
+                 "fusion", "fused", "smil"],
+    )
+    p.add_argument(
+        "--attn-hidden",
+        type=int,
+        nargs="*",
+        default=None,
+        help="attention widths to search; defaults to "
+        f"{DEFAULT_ATTENTION_GRID['hidden_dim']} (this project's 128 and SMIL's "
+        "512). Must be identical across arms being compared.",
+    )
     p.add_argument("--attn-branches", type=int, default=1, choices=[1, 3])
+    p.add_argument(
+        "--global-source",
+        default="auto",
+        choices=["auto", "cls", "patch_mean"],
+        help="fusion head only: where the global branch reads from. 'auto' "
+        "resolves to 'cls' if the cache has prefix tokens and 'patch_mean' "
+        "otherwise, and the resolved value is recorded in results.json.",
+    )
 
     p.add_argument("--lr", type=float, nargs="*", default=None, help="override the default grid")
     p.add_argument("--weight-decay", type=float, nargs="*", default=None)
