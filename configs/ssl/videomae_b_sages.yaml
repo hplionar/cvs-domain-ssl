@@ -43,5 +43,5 @@ train:
   warmup_steps: 875
   num_workers: 24
   prefetch_factor: 4
-  save_every_steps: 500
+  save_every_steps: 200
   log_every_steps: 20
