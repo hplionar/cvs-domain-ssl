@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=96G
 #SBATCH --time=12:00:00
-#SBATCH --array=1-4%1
+#SBATCH --array=1-6%1
 #SBATCH --signal=B:USR1@600
 #SBATCH --output=/group/pmc085/hlionar/outputs/cvs-domain-ssl/logs/%x_%A_%a.out
 #SBATCH --error=/group/pmc085/hlionar/outputs/cvs-domain-ssl/logs/%x_%A_%a.err
