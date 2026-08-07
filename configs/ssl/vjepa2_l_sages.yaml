@@ -22,7 +22,7 @@ model:
   # ViT-L is 326M parameters against VideoMAE ViT-B's 86M; gradient
   # checkpointing trades compute for the memory to fit a useful batch on a
   # 32 GiB V100.
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 
 data:
   video_dir: /group/pmc085/hlionar/datasets/SAGES_CVS_Challenge_2024/train/videos
