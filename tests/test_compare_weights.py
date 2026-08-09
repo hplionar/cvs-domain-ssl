@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from scripts.compare_weights import block_of, compare
@@ -108,3 +109,62 @@ def test_block_summary_aggregates():
     stats = compare(before, after)["blocks"]["layer_00"]
     assert stats["num_params"] == 2
     assert stats["max_rel_change"] > stats["mean_rel_change"]
+
+
+# -- architecture detection -----------------------------------------------
+
+
+def test_detects_videomae():
+    from scripts.compare_weights import detect_architecture
+
+    assert detect_architecture("MCG-NJU/videomae-base") == "videomae"
+    assert detect_architecture("MCG-NJU/videomae-large") == "videomae"
+
+
+def test_detects_vjepa():
+    from scripts.compare_weights import detect_architecture
+
+    assert detect_architecture("facebook/vjepa2-vitl-fpc16-256-ssv2") == "vjepa2"
+    assert detect_architecture("facebook/vjepa2-vitl-fpc64-256") == "vjepa2"
+
+
+def test_detects_from_payload_when_path_is_uninformative():
+    from scripts.compare_weights import detect_architecture
+
+    payload = {"config": {"model": {"checkpoint": "facebook/vjepa2-vitl-fpc16-256-ssv2"}}}
+    assert detect_architecture("/tmp/latest.pt", payload) == "vjepa2"
+
+
+def test_unknown_architecture_is_rejected():
+    """Comparing a VideoMAE reference against a V-JEPA checkpoint produces a
+    well-formed report with zero shared parameters rather than an error. Failing
+    at detection makes that impossible."""
+    from scripts.compare_weights import detect_architecture
+
+    with pytest.raises(ValueError, match="Cannot identify the architecture"):
+        detect_architecture("some/unknown-model")
+
+
+def test_block_grouping_handles_both_naming_schemes():
+    """VideoMAE nests blocks under encoder.layer.N; V-JEPA names them layer.N."""
+    from scripts.compare_weights import block_of
+
+    assert block_of("encoder.layer.7.attention.output.dense.weight") == "layer_07"
+    assert block_of("layer.7.attention.query.weight") == "layer_07"
+    assert block_of("embeddings.patch_embeddings.proj.weight") == "embeddings"
+
+
+def test_architecture_specifies_bias_repair_only_for_videomae():
+    """V-JEPA stores query, key and value biases under the names transformers
+    expects, so the repair is a VideoMAE-specific fix."""
+    from scripts.compare_weights import ARCHITECTURES
+
+    assert ARCHITECTURES["videomae"]["repair_bias"] is True
+    assert ARCHITECTURES["vjepa2"]["repair_bias"] is False
+
+
+def test_state_prefixes_differ():
+    from scripts.compare_weights import ARCHITECTURES
+
+    assert ARCHITECTURES["videomae"]["state_prefix"] == "videomae."
+    assert ARCHITECTURES["vjepa2"]["state_prefix"] == "encoder."

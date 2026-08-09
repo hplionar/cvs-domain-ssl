@@ -35,24 +35,74 @@ from typing import Any
 import torch
 
 
-def load_reference(name: str) -> dict[str, torch.Tensor]:
-    """Encoder weights from the original checkpoint, with biases repaired.
+ARCHITECTURES = {
+    "videomae": {
+        "reference_class": "VideoMAEForPreTraining",
+        "encoder_attr": "videomae",
+        "state_prefix": "videomae.",
+        "repair_bias": True,
+    },
+    "vjepa2": {
+        "reference_class": "VJEPA2Model",
+        "encoder_attr": "encoder",
+        "state_prefix": "encoder.",
+        "repair_bias": False,
+    },
+}
 
-    Without the repair this compares a repaired trained model against an
-    unrepaired reference, so the 36 attention biases appear as zero-norm
-    parameters and their movement is discarded. The comparison would then be
-    against weights the training run never started from.
+
+def detect_architecture(checkpoint_name: str, payload: dict[str, Any] | None = None) -> str:
+    """Identify the architecture from the checkpoint identifier or payload.
+
+    Comparing a VideoMAE reference against a V-JEPA checkpoint produces a
+    well-formed but meaningless report: every key is missing on both sides and
+    the tool reports zero shared parameters rather than failing. Detecting the
+    architecture makes that impossible.
     """
-    from transformers import VideoMAEForPreTraining
+    haystack = (checkpoint_name or "").lower()
+    if payload:
+        haystack += " " + str(payload.get("config", {}).get("model", {}).get("checkpoint", "")).lower()
 
-    from models.encoders.videomae_encoder import repair_qkv_bias
+    for key in ("vjepa2", "vjepa"):
+        if key in haystack:
+            return "vjepa2"
+    if "videomae" in haystack:
+        return "videomae"
 
-    model = VideoMAEForPreTraining.from_pretrained(name)
-    repair_qkv_bias(model, name)
-    return {k: v.detach().cpu().float() for k, v in model.videomae.state_dict().items()}
+    raise ValueError(
+        f"Cannot identify the architecture from {checkpoint_name!r}. Supported: "
+        f"{sorted(ARCHITECTURES)}. Pass --architecture explicitly."
+    )
 
 
-def load_trained(path: Path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+def load_reference(name: str, architecture: str) -> dict[str, torch.Tensor]:
+    """Encoder weights from the original checkpoint.
+
+    For VideoMAE the attention biases are repaired first. Without that, the
+    comparison is against weights the training run never started from, and the
+    36 biases appear as zero-norm parameters whose movement is discarded.
+    V-JEPA has no equivalent problem: its checkpoint stores query, key and value
+    biases under the names transformers expects.
+    """
+    spec = ARCHITECTURES[architecture]
+
+    if architecture == "videomae":
+        from transformers import VideoMAEForPreTraining
+
+        from models.encoders.videomae_encoder import repair_qkv_bias
+
+        model = VideoMAEForPreTraining.from_pretrained(name)
+        repair_qkv_bias(model, name)
+        encoder = model.videomae
+    else:
+        from transformers import VJEPA2Model
+
+        encoder = VJEPA2Model.from_pretrained(name).encoder
+
+    return {k: v.detach().cpu().float() for k, v in encoder.state_dict().items()}
+
+
+def load_trained(path: Path, architecture: str | None = None) -> tuple[dict[str, torch.Tensor], dict[str, Any], str]:
     """Encoder weights from a training checkpoint or an exported encoder.
 
     Handles both ``latest.pt`` (full training state, encoder keys prefixed with
@@ -61,20 +111,27 @@ def load_trained(path: Path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
     meta = {k: payload.get(k) for k in ("step", "epoch") if k in payload}
 
+    base = payload.get("config", {}).get("model", {}).get("checkpoint", "")
+    architecture = architecture or detect_architecture(str(path), payload)
+    prefix = ARCHITECTURES[architecture]["state_prefix"]
+
     state = payload.get("model", payload)
     encoder = {
-        k[len("videomae.") :]: v.detach().cpu().float()
+        k[len(prefix):]: v.detach().cpu().float()
         for k, v in state.items()
-        if k.startswith("videomae.")
+        if k.startswith(prefix)
     }
     if not encoder:
         encoder = {k: v.detach().cpu().float() for k, v in state.items()}
-    return encoder, meta
+
+    meta["base_checkpoint"] = base
+    return encoder, meta, architecture
 
 
 def block_of(name: str) -> str:
     """Group a parameter name into an architectural block for aggregation."""
-    match = re.search(r"encoder\.layer\.(\d+)\.", name)
+    # VideoMAE nests blocks under encoder.layer.N; V-JEPA names them layer.N.
+    match = re.search(r"(?:encoder\.)?layer\.(\d+)\.", name)
     if match:
         return f"layer_{int(match.group(1)):02d}"
     if "embeddings" in name:
@@ -197,18 +254,34 @@ def render(result: dict[str, Any], top: int = 10) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--before", default="MCG-NJU/videomae-base",
-                        help="original checkpoint identifier")
+    parser.add_argument("--before", default=None,
+                        help="original checkpoint identifier; read from the "
+                             "trained checkpoint's config when omitted")
+    parser.add_argument("--architecture", default=None, choices=sorted(ARCHITECTURES),
+                        help="override architecture detection")
     parser.add_argument("--after", required=True, help="trained checkpoint path")
     parser.add_argument("--json", default=None, help="write full comparison here")
     parser.add_argument("--top", type=int, default=10)
     args = parser.parse_args()
 
-    before = load_reference(args.before)
-    after, meta = load_trained(Path(args.after))
+    peek = torch.load(args.after, map_location="cpu", weights_only=False)
+    recorded = peek.get("config", {}).get("model", {}).get("checkpoint")
+    checkpoint_name = args.before or recorded
+    if not checkpoint_name:
+        raise SystemExit(
+            "No base checkpoint recorded in the trained file; pass --before."
+        )
+    architecture = args.architecture or detect_architecture(checkpoint_name, peek)
+    del peek
 
+    before = load_reference(checkpoint_name, architecture)
+    after, meta, architecture = load_trained(Path(args.after), architecture)
+
+    print(f"architecture  {architecture}")
+    print(f"reference     {checkpoint_name}")
     if meta:
-        print(f"trained checkpoint at step {meta.get('step')}, epoch {meta.get('epoch')}\n")
+        print(f"trained       step {meta.get('step')}, epoch {meta.get('epoch')}")
+    print()
 
     result = compare(before, after)
     render(result, top=args.top)
