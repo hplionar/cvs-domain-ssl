@@ -1,0 +1,66 @@
+# V-JEPA 2 ViT-L continued pretraining on SAGES — experiment E2.2
+#
+# Checkpoint: vjepa2-vitl-fpc16-256-ssv2, chosen because it is the only released
+# V-JEPA 2 variant at 16 frames. The fpc64 checkpoints require 64 frames at
+# 256 px, giving 8192 tokens against VideoMAE's 1568 — roughly 90x the compute
+# per sample and no comparability on temporal extent. At 16 frames and 256 px
+# this gives 8 x 16 x 16 = 2048 tokens, close to VideoMAE's geometry.
+#
+# LIMITATION: the -ssv2 suffix denotes supervised fine-tuning on
+# Something-Something V2. VideoMAE-base is a pure SSL checkpoint, so the two
+# arms are not matched on supervision history. No pure-SSL V-JEPA 2 checkpoint
+# exists at 16 frames. This must be stated in the write-up.
+#
+# DIAGNOSTIC VARIANT. lr 1.0e-6, roughly 5x below the linear-scaling value of
+# 4.7e-6 used in the main run, and 5 epochs rather than 20. Tests whether the
+# adaptation degradation observed there (0.3356 -> 0.2085) was a learning-rate
+# artefact or a property of the objective. See docs/journal/weeks_3_4.md 2.2.
+# SSL hyperparameters are otherwise unmodified and are not tuned.
+
+seed: 0
+output_dir: /group/pmc085/hlionar/outputs/cvs-domain-ssl/ssl/vjepa2_l_sages_lr1e6
+
+model:
+  checkpoint: facebook/vjepa2-vitl-fpc16-256-ssv2
+  # ViT-L is 326M parameters against VideoMAE ViT-B's 86M; gradient
+  # checkpointing trades compute for the memory to fit a useful batch on a
+  # 32 GiB V100.
+  gradient_checkpointing: false
+
+data:
+  video_dir: /group/pmc085/hlionar/datasets/SAGES_CVS_Challenge_2024/train/videos
+  num_frames: 16
+  stride: 4
+  clips_per_video: 40
+  image_size: 256
+  crop_scale: [0.5, 1.0]
+  decode_size: 288
+  reader_cache_size: 4
+  augment: true
+  exclude_video_ids: []
+
+train:
+  batch_size: 8
+  epochs: 5
+  lr: 1.0e-6
+  min_lr_ratio: 0.01
+  weight_decay: 0.04
+  betas: [0.9, 0.95]
+  grad_clip: 1.0
+  warmup_steps: 200
+
+  # Masking: 8 blocks at 15-20% of the spatial grid each, unioned and spanning
+  # the temporal axis. Yields roughly 60-70% masked, comparable to V-JEPA's
+  # published multi-block configuration.
+  num_blocks: 8
+  block_scale: [0.15, 0.2]
+
+  # EMA momentum rises to 1.0 on a cosine schedule. A faster teacher early lets
+  # the target track the student while both move quickly; a near-frozen teacher
+  # later stabilises the objective.
+  ema_momentum: 0.998
+
+  num_workers: 24
+  prefetch_factor: 4
+  save_every_steps: 200
+  log_every_steps: 20
