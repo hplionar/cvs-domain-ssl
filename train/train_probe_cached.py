@@ -481,12 +481,32 @@ def aggregate(results: list[RunResult], grid: list[dict[str, float]]) -> list[di
     for config in grid:
         matching = [r for r in results if r.config == config]
         maps = [r.best_map for r in matching]
+
+        # Per-criterion metrics are computed by compute_multilabel_metrics and
+        # stored on each RunResult, but were previously discarded here. The
+        # C1/C2/C3 breakdown is the substantive result: every SAGES Challenge
+        # submission finds C2 far easier than C1 and C3, and the hypothesis
+        # under test predicts that split.
+        per_criterion: dict[str, dict[str, float]] = {}
+        metric_keys = sorted({k for r in matching for k in r.best_metrics})
+        for key in metric_keys:
+            values = [r.best_metrics[key] for r in matching if key in r.best_metrics]
+            if not values:
+                continue
+            per_criterion[key] = {
+                "mean": float(np.mean(values)),
+                "std": float(np.std(values, ddof=1)) if len(values) > 1 else 0.0,
+                "seeds": {r.seed: r.best_metrics[key]
+                          for r in matching if key in r.best_metrics},
+            }
+
         out.append({
             "config": config,
             "mean_map": float(np.mean(maps)),
             "std_map": float(np.std(maps, ddof=1)) if len(maps) > 1 else 0.0,
             "seeds": {r.seed: r.best_map for r in matching},
             "best_epochs": [r.best_epoch for r in matching],
+            "metrics": per_criterion,
         })
     out.sort(key=lambda entry: entry["mean_map"], reverse=True)
     return out
