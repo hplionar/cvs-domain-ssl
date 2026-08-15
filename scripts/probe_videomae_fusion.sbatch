@@ -52,7 +52,7 @@ for ARM in adapted base; do
     --train-features $ROOT/cache/videomae_b_${ARM}/sages/train \
     --val-features   $ROOT/cache/videomae_b_${ARM}/sages/val \
     --head fusion --seeds 3 --in-memory \
-    --lr 3e-3 --attn-hidden 512 \
+    --lr 3e-3 --attn-hidden 128 \
     --weight-decay 0.01 \
     --dropout 0.0 \
     --epochs 15 \
