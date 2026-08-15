@@ -29,7 +29,7 @@ TINY = dict(hidden_size=32, num_hidden_layers=1, num_attention_heads=2, intermed
 
 def _args(**overrides) -> argparse.Namespace:
     base = dict(
-        encoder="mae_b", model_name=None, checkpoint=None,
+        encoder="mae_b", model_name=None, checkpoint=None, layer_depths=None,
         dataset="endoscapes", split="train",
         dataset_root=None, manifest_path=None, out=None, reduction="none",
         batch_size=4, num_workers=0, prefetch_factor=2, device="cpu", amp=False,

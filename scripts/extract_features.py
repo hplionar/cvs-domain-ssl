@@ -308,10 +308,28 @@ def extract(args: argparse.Namespace) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    depths = None if args.layer_depths is None else tuple(args.layer_depths)
+    if depths is not None:
+        if args.reduction != "none":
+            raise SystemExit(
+                f"--layer-depths requires --reduction none, got "
+                f"{args.reduction!r}. Reducing every layer would discard the "
+                f"spatial structure the depth comparison is meant to examine."
+            )
+        if any(not 0.0 < d <= 1.0 for d in depths):
+            raise SystemExit(
+                f"Layer depths must lie in (0, 1], got {depths}. Depth 0 is the "
+                f"embedding output, which precedes every transformer block."
+            )
+
     gib = n * n_tokens * dim * 2 / 1024**3
+    if depths is not None:
+        gib += n * len(depths) * n_tokens * dim * 2 / 1024**3
     print(f"encoder      {args.encoder}  ({encoder.checkpoint_id})")
     print(f"grid         {layout.grid}  ->  {n_tokens} tokens x {dim} dim  [{args.reduction}]")
     print(f"samples      {n}")
+    if depths is not None:
+        print(f"layers       {depths}  ->  extra [{n}, {len(depths)}, {n_tokens}, {dim}]")
     print(f"cache size   {gib:.2f} GiB")
     print(f"device       {device}  amp={'fp16' if args.amp else 'off'}")
     print(f"output       {out_dir}")
@@ -331,6 +349,15 @@ def extract(args: argparse.Namespace) -> int:
             mode="w+",
             dtype=np.float16,
             shape=(n, layout.num_prefix_tokens, dim),
+        )
+
+    layers_mm = None
+    if depths is not None:
+        layers_mm = np.lib.format.open_memmap(
+            out_dir / "layers.npy",
+            mode="w+",
+            dtype=np.float16,
+            shape=(n, len(depths), n_tokens, dim),
         )
 
     targets = np.zeros((n, 3), dtype=np.float32)
@@ -361,7 +388,7 @@ def extract(args: argparse.Namespace) -> int:
         for inputs, ids, video_ids, target in iter_batches(loader, keys):
             inputs = inputs.to(device, non_blocking=True)
             with autocast:
-                out = encoder(inputs)
+                out = encoder(inputs, layer_depths=depths)
 
             reduced = apply_reduction(out.tokens.float(), encoder, args.reduction)
             size = reduced.shape[0]
@@ -369,6 +396,16 @@ def extract(args: argparse.Namespace) -> int:
             tokens_mm[cursor : cursor + size] = reduced.half().cpu().numpy()
             if prefix_mm is not None and out.prefix is not None:
                 prefix_mm[cursor : cursor + size] = out.prefix.float().half().cpu().numpy()
+            if layers_mm is not None:
+                if out.hidden_states is None:
+                    raise RuntimeError(
+                        f"{type(encoder).__name__} returned no hidden states "
+                        f"despite layer_depths={depths}. Writing the cache "
+                        f"anyway would leave layers.npy silently zero-filled."
+                    )
+                layers_mm[cursor : cursor + size] = (
+                    out.hidden_states.float().half().cpu().numpy()
+                )
             if target is not None:
                 targets[cursor : cursor + size] = target.numpy()
 
@@ -395,6 +432,8 @@ def extract(args: argparse.Namespace) -> int:
     tokens_mm.flush()
     if prefix_mm is not None:
         prefix_mm.flush()
+    if layers_mm is not None:
+        layers_mm.flush()
     np.save(out_dir / "targets.npy", targets)
 
     with open(out_dir / "index.csv", "w", newline="", encoding="utf-8") as fh:
@@ -406,7 +445,12 @@ def extract(args: argparse.Namespace) -> int:
     manifest["shapes"] = {
         "tokens": [n, n_tokens, dim],
         "prefix": None if prefix_mm is None else [n, layout.num_prefix_tokens, dim],
+        "layers": None if layers_mm is None else [n, len(depths), n_tokens, dim],
     }
+    # Recorded so that verify_protocol can refuse to compare a depth cache
+    # against a final-layer-only one, and so the resolved block indices are
+    # recoverable from the cache alone.
+    manifest["layer_depths"] = None if depths is None else list(depths)
     with open(out_dir / "manifest.json", "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=2)
 
@@ -482,6 +526,21 @@ def parse_args() -> argparse.Namespace:
         "instead of downloading weights; for throughput and memory testing",
     )
     p.add_argument("--smoke-size", type=int, default=64)
+    p.add_argument(
+        "--layer-depths",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="D",
+        help=(
+            "Relative depths in (0, 1] at which to additionally cache "
+            "intermediate layers, e.g. --layer-depths 0.25 0.5 0.75 1.0. "
+            "Relative rather than absolute so that a depth means the same "
+            "fraction of the network in a 12-block and a 24-block encoder. "
+            "Written to layers.npy as [N, L, tokens, D]; tokens.npy still holds "
+            "the final layer. Disk cost is linear in the number of depths."
+        ),
+    )
     p.add_argument("--dry-run", action="store_true", help="report shapes and cache size, write nothing")
 
     args = p.parse_args()
