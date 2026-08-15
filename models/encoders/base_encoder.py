@@ -395,7 +395,10 @@ class BaseEncoder(nn.Module, ABC):
         layer is returned and behaviour is unchanged.
         """
         self._validate_input(x)
-        out = self._forward_tokens(x, layer_depths=layer_depths)
+        if layer_depths is None:
+            out = self._forward_tokens(x)
+        else:
+            out = self._forward_tokens(x, layer_depths=layer_depths)
         self._validate_output(out, batch_size=x.shape[0])
         if layer_depths is not None and out.hidden_states is None:
             raise RuntimeError(
