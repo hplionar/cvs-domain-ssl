@@ -120,7 +120,18 @@ class MAEEncoder(BaseEncoder):
         n = self._layout.num_tokens
         return torch.arange(n, dtype=torch.float32, device=device).div(n).expand(batch_size, n)
 
-    def _forward_tokens(self, x: torch.Tensor) -> EncoderOutput:
+    def _forward_tokens(
+        self,
+        x: torch.Tensor,
+        *,
+        layer_depths: tuple[float, ...] | None = None,
+    ) -> EncoderOutput:
+        if layer_depths is not None:
+            raise NotImplementedError(
+                "ViTMAEEncoder does not yet support layer_depths. "
+                "Returning the final layer silently would make a depth "
+                "comparison meaningless."
+            )
         out = self.model(pixel_values=x, noise=self._monotonic_noise(x.shape[0], x.device))
         hidden = out.last_hidden_state
 

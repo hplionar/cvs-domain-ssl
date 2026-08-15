@@ -119,7 +119,18 @@ class DINOv3Encoder(BaseEncoder):
     def num_register_tokens(self) -> int:
         return self._num_registers
 
-    def _forward_tokens(self, x: torch.Tensor) -> EncoderOutput:
+    def _forward_tokens(
+        self,
+        x: torch.Tensor,
+        *,
+        layer_depths: tuple[float, ...] | None = None,
+    ) -> EncoderOutput:
+        if layer_depths is not None:
+            raise NotImplementedError(
+                "DINOv3ViTEncoder does not yet support layer_depths. "
+                "Returning the final layer silently would make a depth "
+                "comparison meaningless."
+            )
         hidden = self.model(pixel_values=x).last_hidden_state
         n_prefix = self._layout.num_prefix_tokens
         expected = self._layout.num_tokens + n_prefix

@@ -364,9 +364,31 @@ class VideoMAEEncoder(BaseEncoder):
         record["adaptation"] = self._adaptation
         return record
 
-    def _forward_tokens(self, x: torch.Tensor) -> EncoderOutput:
-        out = self.model(pixel_values=x)
-        return EncoderOutput(tokens=out.last_hidden_state, prefix=None)
+    def _forward_tokens(
+        self,
+        x: torch.Tensor,
+        *,
+        layer_depths: tuple[float, ...] | None = None,
+    ) -> EncoderOutput:
+        if layer_depths is None:
+            out = self.model(pixel_values=x)
+            return EncoderOutput(tokens=out.last_hidden_state, prefix=None)
+
+        from models.encoders.base_encoder import resolve_layer_indices
+
+        out = self.model(pixel_values=x, output_hidden_states=True)
+        # VideoMAE emits no prefix token, so every hidden state is already pure
+        # patch tokens and needs no slicing. Encoders with a CLS or register
+        # tokens must strip them here.
+        indices = resolve_layer_indices(
+            layer_depths, self.model.config.num_hidden_layers
+        )
+        selected = torch.stack([out.hidden_states[i] for i in indices], dim=1)
+        return EncoderOutput(
+            tokens=out.last_hidden_state,
+            prefix=None,
+            hidden_states=selected,
+        )
 
 
 @register_encoder("videomae_b")

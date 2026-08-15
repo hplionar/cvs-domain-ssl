@@ -59,11 +59,25 @@ class EncoderOutput(NamedTuple):
         Retained rather than discarded because several published linear-probe
         protocols concatenate the CLS token with mean-pooled patch tokens. Note
         that DINOv3 register tokens are *not* spatial and must never be treated
-        as patches; keeping them here, separated, prevents that error.
+	as patches; keeping them here, separated, prevents that error.
+    
+
+    hidden_states:
+        Patch tokens from selected intermediate layers, shape
+        ``[B, L, N, D]`` where ``L`` is the number of layers requested, or
+        ``None`` when they were not requested. Prefix tokens are removed from
+        each layer exactly as they are from ``tokens``, so the spatial layout is
+        identical across the layer axis.
+
+        Requested because feature extraction otherwise keeps only the final
+        layer. If different CVS criteria are resolved at different levels of
+        abstraction -- C2 (tissue cleared) plausibly earlier than C1 (counting
+        two structures) -- a last-layer probe discards the evidence.
     """
 
     tokens: torch.Tensor
     prefix: torch.Tensor | None = None
+    hidden_states: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +154,37 @@ class TokenLayout:
         return self.num_tokens * self.dim * dtype_size
 
 
+def resolve_layer_indices(
+    relative_depths: tuple[float, ...],
+    num_layers: int,
+) -> tuple[int, ...]:
+    """Map relative depths in (0, 1] to indices into a hidden_states tuple.
+
+    HuggingFace returns ``num_layers + 1`` tensors, index 0 being the embedding
+    output before any block. Depth ``d`` maps to index ``round(d * num_layers)``,
+    so 1.0 is the final block and 0.25 of a 12-block model is block 3.
+
+    Index 0 is unreachable by construction: the embedding output precedes every
+    transformer block and is close to a linear projection of pixels, so a
+    "shallow layers do not help" conclusion should not be able to rest on it.
+    """
+    if not relative_depths:
+        raise ValueError("relative_depths must not be empty.")
+    if any(not 0.0 < d <= 1.0 for d in relative_depths):
+        raise ValueError(
+            f"relative depths must lie in (0, 1], got {relative_depths}. "
+            f"Depth 0 is the embedding output, which is deliberately excluded."
+        )
+    indices = tuple(max(1, round(d * num_layers)) for d in relative_depths)
+    if len(set(indices)) != len(indices):
+        raise ValueError(
+            f"Relative depths {relative_depths} collapse to duplicate layer "
+            f"indices {indices} for a {num_layers}-layer model. Request fewer "
+            f"depths or space them further apart."
+        )
+    return indices
+
+
 class BaseEncoder(nn.Module, ABC):
     """Abstract frozen feature extractor returning token grids.
 
@@ -179,8 +224,17 @@ class BaseEncoder(nn.Module, ABC):
         """Structure of the returned token grid."""
 
     @abstractmethod
-    def _forward_tokens(self, x: torch.Tensor) -> EncoderOutput:
+    def _forward_tokens(
+        self,
+        x: torch.Tensor,
+        *,
+        layer_depths: tuple[float, ...] | None = None,
+    ) -> EncoderOutput:
         """Run the underlying model and return patch tokens with prefix separated.
+
+        Implementations that support ``layer_depths`` must also strip prefix
+        tokens from each returned layer, so that the spatial layout is identical
+        along the layer axis.
 
         Subclasses must strip CLS and register tokens from ``tokens`` and place
         them in ``prefix``. Returning them concatenated is a contract violation
@@ -328,14 +382,37 @@ class BaseEncoder(nn.Module, ABC):
 
     # -- entry points -----------------------------------------------------
 
-    def forward(self, x: torch.Tensor) -> EncoderOutput:
+    def forward(
+        self,
+        x: torch.Tensor,
+        *,
+        layer_depths: tuple[float, ...] | None = None,
+    ) -> EncoderOutput:
+        """Run the encoder.
+
+        ``layer_depths`` requests intermediate layers as relative depths in
+        (0, 1]; see ``resolve_layer_indices``. When omitted, only the final
+        layer is returned and behaviour is unchanged.
+        """
         self._validate_input(x)
-        out = self._forward_tokens(x)
+        out = self._forward_tokens(x, layer_depths=layer_depths)
         self._validate_output(out, batch_size=x.shape[0])
+        if layer_depths is not None and out.hidden_states is None:
+            raise RuntimeError(
+                f"{type(self).__name__} ignored layer_depths and returned no "
+                f"hidden states. Silently falling back to the final layer would "
+                f"make a depth comparison meaningless."
+            )
         return out
 
     @torch.no_grad()
-    def extract(self, x: torch.Tensor, *, to_dtype: torch.dtype | None = torch.float16) -> EncoderOutput:
+    def extract(
+        self,
+        x: torch.Tensor,
+        *,
+        to_dtype: torch.dtype | None = torch.float16,
+        layer_depths: tuple[float, ...] | None = None,
+    ) -> EncoderOutput:
         """Deterministic extraction path used by ``scripts/extract_features.py``.
 
         Wraps ``forward`` in ``no_grad`` and optionally casts to the cache dtype.
@@ -350,7 +427,7 @@ class BaseEncoder(nn.Module, ABC):
         was_training = self.training
         self.eval()
         try:
-            out = self.forward(x)
+            out = self.forward(x, layer_depths=layer_depths)
         finally:
             if was_training:
                 super().train(True)
@@ -360,6 +437,7 @@ class BaseEncoder(nn.Module, ABC):
         return EncoderOutput(
             tokens=out.tokens.to(to_dtype),
             prefix=None if out.prefix is None else out.prefix.to(to_dtype),
+            hidden_states=(None if out.hidden_states is None else out.hidden_states.to(to_dtype)),
         )
 
     def __repr__(self) -> str:

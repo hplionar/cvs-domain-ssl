@@ -253,7 +253,18 @@ class VJEPA2Encoder(BaseEncoder):
             record["adaptation"] = self._adaptation
         return record
 
-    def _forward_tokens(self, x: torch.Tensor) -> EncoderOutput:
+    def _forward_tokens(
+        self,
+        x: torch.Tensor,
+        *,
+        layer_depths: tuple[float, ...] | None = None,
+    ) -> EncoderOutput:
+        if layer_depths is not None:
+            raise NotImplementedError(
+                "VJEPA2Encoder does not yet support layer_depths. "
+                "Returning the final layer silently would make a depth "
+                "comparison meaningless."
+            )
         out = self.model(pixel_values_videos=x, skip_predictor=True)
         return EncoderOutput(tokens=out.last_hidden_state, prefix=None)
 
