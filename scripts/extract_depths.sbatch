@@ -86,9 +86,9 @@ VJEPA_ADAPTED=$ROOT/outputs/cvs-domain-ssl/ssl/vjepa2_l_sages/encoder_final.pt
 for SPLIT in val train; do
   extract videomae_b_base    videomae_b "$SPLIT"
   extract videomae_b_adapted videomae_b "$SPLIT" --checkpoint "$VMAE_ADAPTED"
-  extract vjepa2_l_base      vjepa2_l   "$SPLIT" --model-name "$VJEPA_BASE"
-  extract vjepa2_l_adapted   vjepa2_l   "$SPLIT" --model-name "$VJEPA_BASE" \
-                                                 --checkpoint "$VJEPA_ADAPTED"
+  # extract vjepa2_l_base      vjepa2_l   "$SPLIT" --model-name "$VJEPA_BASE"
+  # extract vjepa2_l_adapted   vjepa2_l   "$SPLIT" --model-name "$VJEPA_BASE" \
+  #                                               --checkpoint "$VJEPA_ADAPTED"
 done
 
 echo

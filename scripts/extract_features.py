@@ -56,6 +56,7 @@ from models.encoders.base_encoder import BaseEncoder
 # Registration side effects: importing populates the registry.
 import models.encoders.dinov2_encoder  # noqa: F401
 import models.encoders.dinov3_encoder  # noqa: F401
+import models.encoders.ijepa_encoder  # noqa: F401
 import models.encoders.mae_encoder  # noqa: F401
 import models.encoders.videomae_encoder  # noqa: F401
 import models.encoders.vjepa2_encoder  # noqa: F401
