@@ -1,0 +1,78 @@
+# ViT-MAE ViT-B continued pretraining on SAGES frames — experiment E2.3
+#
+# The image-modality counterpart to videomae_b_sages.yaml. Together with a
+# DINOv2 arm this fills the objective-family by modality design:
+#
+#                masked reconstruction     latent prediction
+#   image        ViT-MAE  (this file)      I-JEPA
+#   video        VideoMAE                  V-JEPA 2
+#
+# CORPUS. derived_ssl/sparse holds 63,000 frames at 1 fps over 700 procedures;
+# derived_ssl/dense holds 315,000 at 5 fps. Both were extracted with the
+# challenge's own tools/preprocess_videos.py, so they are produced exactly as
+# the labelled frames were. Switch with --override data.frames_dir to run
+# corpus density as a factor.
+#
+# These are NOT the frames in derived/train/frames. Those are the 18 labelled
+# frames per procedure plus a boundary frame -- every one of them also in the
+# evaluation set, so pretraining on them would mean adapting on exactly the
+# frames the probe is scored on.
+#
+# LEARNING RATE. MAE's rule is blr * batch/256 with blr 1.5e-4, giving 3.75e-5
+# at batch 64. The scaled value is written here rather than the base: using
+# 1.5e-4 flat at batch 4 on the VideoMAE arm made the loss rise with the
+# learning rate and return to its starting value as it decayed, for no net
+# progress over 700 steps.
+#
+# MASK RATIO. 0.75, the published value, unmodified. VideoMAE uses 0.90 because
+# adjacent video frames are highly redundant; single frames are not.
+
+seed: 0
+output_dir: /group/pmc085/hlionar/outputs/cvs-domain-ssl/ssl/mae_b_sages_sparse
+
+model:
+  checkpoint: facebook/vit-mae-base
+  mask_ratio: 0.75
+  # ViT-B at 224 px is 86M parameters and 197 tokens; unnecessary on a 32 GiB
+  # V100, where the batch fits comfortably without trading compute for memory.
+  gradient_checkpointing: false
+
+data:
+  frames_dir: /group/pmc085/hlionar/datasets/SAGES_CVS_Challenge_2024/derived_ssl/sparse/train/frames
+  image_size: 224
+  # Random resized crop and horizontal flip only. The stronger recipe in
+  # build_ssl_train_transform adds ColorJitter (hue 0.05, p=0.8) and
+  # RandomGrayscale, and data/transforms.py records that hue perturbation
+  # degrades the tissue-colour cue CVS criterion C2 depends on. C2 is the
+  # highest-scoring criterion in all eight SAGES arms measured so far, so that
+  # is a live risk rather than a hypothetical one.
+  #
+  # Set strong_augment: true to run the stronger recipe as its own arm.
+  augment: true
+  strong_augment: false
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  interpolation: bicubic
+  # null uses every frame. A per-procedure quota matters only when corpora of
+  # differing procedure length are combined -- every SAGES video is 90 seconds,
+  # so at a fixed rate each yields the same count.
+  frames_per_video: null
+  exclude_video_ids: []
+
+train:
+  batch_size: 64
+  epochs: 20
+  lr: 3.75e-5
+  min_lr_ratio: 0.01
+  weight_decay: 0.05
+  betas: [0.9, 0.95]
+  grad_clip: 1.0
+  # Roughly 5% of the schedule. 63,000 frames at batch 64 is 984 steps per
+  # epoch, so 20 epochs is 19,680 steps.
+  warmup_steps: 1000
+  num_workers: 12
+  prefetch_factor: 4
+  # Six minutes between saves at the expected rate. A job killed at a walltime
+  # boundary then loses minutes rather than an hour.
+  save_every_steps: 200
+  log_every_steps: 20
