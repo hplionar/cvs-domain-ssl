@@ -1,0 +1,107 @@
+# DINOv2 ViT-B continued pretraining on SAGES frames — experiment E2.4
+#
+# The third image arm. Together with ViT-MAE and I-JEPA this covers all three
+# objective families in the image modality:
+#
+#                                  frozen mAP on SAGES
+#   self-distillation  DINOv2            0.4593
+#   masked recon.      ViT-MAE           0.3900
+#   latent prediction  I-JEPA ViT-H      0.3751
+#
+# DINOv2 tops the frozen ranking, which is why it is the encoder worth adapting.
+#
+# BATCH SIZE. 64, from a measurement rather than an estimate:
+# scripts/dino_memory_sweep.py found the full 2+8 recipe fits in 23.06 GiB of
+# 31.7 on a V100 at 79.3 samples/s. Batch 128 OOMs. Because 64 is comfortable,
+# the published centre momentum of 0.9 is used rather than the raised value a
+# noisier small-batch centre estimate would need.
+#
+# COLLAPSE. DINO admits a degenerate solution where the teacher maps everything
+# to one vector and the loss falls to a low, stable value. Issue #272 on
+# facebookresearch/dinov2 reports DINOv2 reaching chance accuracy on a binary
+# medical task after 300 epochs, unanswered. The trainer therefore computes the
+# teacher's effective rank every collapse_every_steps and aborts below 2.0.
+#
+# AUGMENTATION. Colour jitter and grayscale are off. data/transforms.py records
+# that hue perturbation degrades the tissue-colour cue CVS criterion C2 depends
+# on, and C2 is the strongest criterion in all eight SAGES arms measured so far.
+# Set data.colour_jitter: true to run the reference recipe as its own arm.
+
+seed: 0
+output_dir: /group/pmc085/hlionar/outputs/cvs-domain-ssl/ssl/dinov2_b_sages_sparse
+
+model:
+  checkpoint: facebook/dinov2-base
+  gradient_checkpointing: false
+  head:
+    # 65,536 output dimensions, as published. The loss is a cross-entropy over
+    # these treated as a soft codebook, and a wide codebook gives the centring
+    # statistic room to spread mass rather than concentrating it.
+    out_dim: 65536
+    hidden_dim: 2048
+    bottleneck_dim: 256
+    num_layers: 3
+
+data:
+  frames_dir: /group/pmc085/hlionar/datasets/SAGES_CVS_Challenge_2024/derived_ssl/sparse/train/frames
+  global_size: 224
+  local_size: 96
+  # Eight local views, as published. The memory sweep shows this fits at batch
+  # 64, so there is no reason to reduce it — fewer crops would cost augmentation
+  # diversity for about 15% throughput.
+  num_local: 8
+  # Disjoint by construction: a local view always covers a strictly smaller
+  # region than a global one, which is the local-to-global asymmetry the
+  # objective trains on.
+  global_scale: [0.4, 1.0]
+  local_scale: [0.05, 0.4]
+  colour_jitter: false
+  frames_per_video: null
+  exclude_video_ids: []
+
+train:
+  batch_size: 64
+  epochs: 20
+  # DINO's rule is 5e-4 * batch/256, giving 1.25e-4 at batch 64. The scaled
+  # value is written here rather than the base: using an unscaled rate on the
+  # VideoMAE arm made the loss rise with the learning rate and return to its
+  # starting value as it decayed, for no net progress.
+  lr: 1.25e-4
+  min_lr: 1.0e-6
+  # Weight decay rises through training, as published.
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  betas: [0.9, 0.999]
+  grad_clip: 3.0
+  # 63,000 frames at batch 64 is 984 steps per epoch, so 20 epochs is 19,680.
+  # Warmup is roughly 10 epochs' worth of the published 10-epoch schedule scaled
+  # to this shorter run.
+  warmup_steps: 1000
+
+  # A sharp teacher early prevents the uniform-output mode of collapse; the
+  # reference warms this over the first 30 of 100 epochs.
+  teacher_temp_start: 0.04
+  teacher_temp_end: 0.07
+  teacher_temp_warmup_steps: 6000
+  student_temp: 0.1
+
+  # The centre is an EMA of the teacher's batch mean over 65,536 dimensions.
+  # 0.9 is the published value and is appropriate because batch 64 gives a
+  # usable estimate; at batch 8 this would need raising toward 0.996.
+  centre_momentum: 0.9
+
+  # Momentum rises to 1.0, so the teacher slows and eventually freezes. That
+  # stabilises the target late in training at the cost of it no longer tracking
+  # the student.
+  ema_start: 0.996
+  ema_end: 1.0
+
+  num_workers: 12
+  # Lower than other arms: each sample produces ten views, so a worker holds ten
+  # times the tensors before collation.
+  prefetch_factor: 2
+  save_every_steps: 200
+  log_every_steps: 20
+  # Roughly every half hour at the measured rate. Collapse shows in the
+  # representation long before it shows in the loss.
+  collapse_every_steps: 500

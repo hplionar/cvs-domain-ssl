@@ -167,8 +167,15 @@ def measure(batch_size: int, *, device: torch.device, checkpoint: str,
                 # Stand-in for the cross-entropy against a centred, sharpened
                 # teacher. The exact loss does not change the memory profile,
                 # which is what this measures.
-                loss = -(teacher_out.softmax(dim=-1).detach()
-                         * student_out.log_softmax(dim=-1)).sum(dim=-1).mean()
+                # The teacher sees only the global views, the student all of
+                # them, so the two differ in row count. Real DINO pairs each
+                # teacher view against every student view except its own match;
+                # for a memory measurement only the shapes matter, so the
+                # teacher output is repeated to line up.
+                t = teacher_out.softmax(dim=-1).detach()
+                reps = student_out.shape[0] // t.shape[0]
+                t = t.repeat(reps, 1)[: student_out.shape[0]]
+                loss = -(t * student_out.log_softmax(dim=-1)).sum(dim=-1).mean()
 
             torch.cuda.synchronize()
             t1 = time.time()

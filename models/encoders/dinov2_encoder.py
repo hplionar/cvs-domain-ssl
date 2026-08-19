@@ -19,6 +19,8 @@ token or an access request, unlike the DINOv3 family.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
 from typing import Literal
 
 import torch
@@ -109,6 +111,119 @@ class DINOv2Encoder(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def load_adapted_checkpoint(
+    path: str | Path,
+    *,
+    base_checkpoint: str | None = None,
+    fallback_base: str | None = None,
+):
+    """Rebuild a ``Dinov2Model`` carrying weights from continued pretraining.
+
+    ``train/pretrain_dino.py`` exports ``encoder_final.pt`` as a bare state dict
+    of the **teacher** backbone, wrapped alongside the training config. That is
+    not a HuggingFace directory, so ``from_pretrained`` cannot read it and the
+    adapted arm has no route into ``extract_features.py``.
+
+    The teacher rather than the student is exported deliberately: it is the EMA
+    of the student, it is what DINO's own linear-probe protocol evaluates, and
+    collapse is a property of the teacher.
+
+    Unlike the VideoMAE counterpart there is no bias repair, because DINOv2
+    stores query, key and value biases under the names transformers expects.
+    Unlike the V-JEPA counterpart the exported weights are the whole backbone
+    rather than a submodule, so no prefix needs stripping from
+    ``encoder_final.pt`` -- though ``latest.pt`` does carry one.
+
+    Returns ``(model, base_checkpoint, record)``, the record going into the
+    cache manifest so that an adapted cache is distinguishable from a baseline
+    one after the fact.
+    """
+    require_transformers()
+    from transformers import Dinov2Model
+
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"No adapted checkpoint at {path}.")
+
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:  # noqa: BLE001 - checkpoints carry non-tensor config
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"{path} does not look like a checkpoint written by "
+            f"pretrain_dino.py: expected a dict, got {type(payload).__name__}."
+        )
+
+    # encoder_final.pt carries the teacher backbone under "model".
+    # latest.pt carries the whole DINOModel under "teacher", whose keys are
+    # prefixed "backbone." and "head.".
+    if "model" in payload:
+        state = dict(payload["model"])
+        source = "encoder_final"
+    elif "teacher" in payload:
+        state = dict(payload["teacher"])
+        source = "latest"
+    else:
+        raise ValueError(
+            f"{path} has neither a 'model' nor a 'teacher' key; found "
+            f"{sorted(payload)[:8]}. It was not written by pretrain_dino.py."
+        )
+
+    if any(key.startswith("backbone.") for key in state):
+        # Keep the backbone, drop the projection head: the head is a
+        # pretraining artefact and extraction never runs it.
+        state = {
+            key[len("backbone.") :]: value
+            for key, value in state.items()
+            if key.startswith("backbone.")
+        }
+
+    recorded_base = (payload.get("config") or {}).get("model", {}).get("checkpoint")
+    base = base_checkpoint or recorded_base or fallback_base
+    if base is None:
+        raise ValueError(
+            f"{path} records no base checkpoint under config.model.checkpoint, "
+            f"and none was supplied. Pass model_name explicitly so the "
+            f"architecture can be reconstructed."
+        )
+    if base_checkpoint and recorded_base and base_checkpoint != recorded_base:
+        raise ValueError(
+            f"{path} was trained from {recorded_base!r} but {base_checkpoint!r} "
+            f"was requested. Loading adapted weights into a different "
+            f"architecture would either fail loudly or, worse, partially "
+            f"succeed."
+        )
+
+    model = Dinov2Model.from_pretrained(base)
+    result = model.load_state_dict(state, strict=False)
+
+    missing = list(result.missing_keys)
+    unexpected = list(result.unexpected_keys)
+    if missing:
+        raise ValueError(
+            f"{len(missing)} parameters in the {base} architecture were not "
+            f"present in {path.name}: {missing[:5]}. The adapted encoder would "
+            f"carry a mixture of trained and pretrained weights, which is not a "
+            f"state any arm of the comparison is supposed to be in."
+        )
+
+    record = {
+        "path": str(path),
+        "base_checkpoint": base,
+        "base_recorded_in_checkpoint": recorded_base,
+        "source_key": source,
+        "step": payload.get("step"),
+        "num_loaded": len(state),
+        "num_ignored": len(unexpected),
+        # The teacher is the EMA of the student. Recorded because a reader of
+        # the manifest cannot otherwise tell which of the two was evaluated.
+        "exported": "teacher_backbone",
+    }
+    return model, base, record
+
+
 class DINOv2ViTEncoder(BaseEncoder):
     """DINOv2 ViT returning patch tokens with ``[CLS]`` separated.
 
@@ -177,9 +292,24 @@ class DINOv2ViTEncoder(BaseEncoder):
         model_name: str | None = None,
         model=None,
         random_init: bool = False,
+        adapted_checkpoint: str | Path | None = None,
         freeze: bool = True,
     ) -> None:
         super().__init__(freeze=freeze)
+
+        self._adaptation: dict[str, Any] | None = None
+        if adapted_checkpoint is not None:
+            if model is not None or random_init:
+                raise ValueError(
+                    "adapted_checkpoint cannot be combined with model= or "
+                    "random_init=True."
+                )
+            model, base, self._adaptation = load_adapted_checkpoint(
+                adapted_checkpoint,
+                base_checkpoint=model_name,
+                fallback_base=self.CHECKPOINTS.get(variant),
+            )
+            model_name = f"{base}+adapted:{Path(adapted_checkpoint).name}"
 
         if model is None and random_init:
             require_transformers()
@@ -250,6 +380,18 @@ class DINOv2ViTEncoder(BaseEncoder):
     @property
     def token_layout(self) -> TokenLayout:
         return self._layout
+
+    def describe(self) -> dict:
+        """Recorded in the cache manifest.
+
+        Without the adaptation record, a cache built from an adapted checkpoint
+        is indistinguishable from a baseline one after the fact, and the two
+        arms of a comparison cannot be told apart from their manifests alone.
+        """
+        record = super().describe()
+        if getattr(self, "_adaptation", None) is not None:
+            record["adaptation"] = self._adaptation
+        return record
 
     @property
     def checkpoint_id(self) -> str:
