@@ -53,8 +53,8 @@ def parse_args() -> argparse.Namespace:
         "--split",
         type=str,
         default="train",
-        choices=["train"],
-        help="Official SAGES split to process. Only train has labels.",
+        choices=["train", "test"],
+        help="Official SAGES split to process.",
     )
 
     return parser.parse_args()
