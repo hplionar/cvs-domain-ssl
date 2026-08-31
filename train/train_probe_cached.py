@@ -384,6 +384,9 @@ def train_one_run(
     best = RunResult(config=config, seed=seed, best_epoch=0, best_map=-1.0, best_metrics={})
     best_logits: np.ndarray | None = None
     best_targets: np.ndarray | None = None
+    # Parameters at the selected epoch. Saved so that held-out scoring loads the
+    # head that was selected rather than attempting to retrain an identical one.
+    best_state: dict[str, torch.Tensor] | None = None
     patience_left = args.patience
 
     for epoch in range(1, args.epochs + 1):
@@ -412,6 +415,9 @@ def train_one_run(
             best.best_epoch = epoch
             best.best_metrics = {k: float(v) for k, v in metrics.items()}
             best_logits, best_targets = logits, targets
+            # Detached and copied to CPU: a live reference would be mutated by
+            # the epochs that follow and would hold GPU memory until the run ends.
+            best_state = {k: v.detach().cpu().clone() for k, v in head.state_dict().items()}
             patience_left = args.patience
         else:
             patience_left -= 1
@@ -420,6 +426,7 @@ def train_one_run(
 
     best.best_logits = best_logits  # type: ignore[attr-defined]
     best.best_targets = best_targets  # type: ignore[attr-defined]
+    best.best_state = best_state  # type: ignore[attr-defined]
     return best
 
 
@@ -711,6 +718,27 @@ def main() -> int:
                 output_dir / f"val_logits_seed{run.seed}.npz",
                 logits=logits,
                 targets=getattr(run, "best_targets"),
+            )
+        state = getattr(run, "best_state", None)
+        if state is not None:
+            # Everything build_head_for needs beyond the configuration, so that
+            # scoring rebuilds through the same construction site rather than
+            # reconstructing its arguments independently.
+            torch.save(
+                {
+                    "state_dict": state,
+                    "config": run.config,
+                    "seed": run.seed,
+                    "epoch": run.best_epoch,
+                    "val_map": run.best_map,
+                    "head_args": {
+                        "head": args.head,
+                        "attn_branches": args.attn_branches,
+                        "global_source": args.global_source,
+                    },
+                    "feature_dim": feature_dim,
+                },
+                output_dir / f"head_seed{run.seed}.pt",
             )
 
     curve = None
