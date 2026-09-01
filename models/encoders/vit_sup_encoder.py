@@ -47,7 +47,12 @@ from __future__ import annotations
 from typing import Any
 
 from models.encoders import register_encoder
-from models.encoders.base_encoder import BaseEncoder, PreprocessSpec, TokenLayout
+from models.encoders.base_encoder import (
+    BaseEncoder,
+    EncoderOutput,
+    PreprocessSpec,
+    TokenLayout,
+)
 from models.encoders.hf_common import (
     cfg_get,
     image_spec,
@@ -147,8 +152,33 @@ class SupervisedViTEncoder(BaseEncoder):
         record["supervision"] = "supervised classification"
         return record
 
-    def _forward_tokens(self, pixel_values):
-        return self.model(pixel_values=pixel_values).last_hidden_state
+    def _forward_tokens(
+        self,
+        x,
+        *,
+        layer_depths: tuple[float, ...] | None = None,
+    ) -> EncoderOutput:
+        if layer_depths is not None:
+            raise NotImplementedError(
+                "SupervisedViTEncoder does not yet support layer_depths. "
+                "Returning the final layer silently would make a depth "
+                "comparison meaningless."
+            )
+        hidden = self.model(pixel_values=x).last_hidden_state
+
+        prefix_count = self._layout.num_prefix_tokens
+        expected = self._layout.num_tokens + prefix_count
+        if hidden.shape[1] != expected:
+            raise RuntimeError(
+                f"Supervised ViT returned {hidden.shape[1]} tokens, expected "
+                f"{expected} ({self._layout.num_tokens} patches plus "
+                f"{prefix_count} prefix). The checkpoint's token layout differs "
+                f"from the one recorded in the manifest."
+            )
+        # The single CLS token leads; the remainder is the 14x14 patch grid in
+        # row-major order. Splitting rather than concatenating is required by
+        # the base class, and keeps the grid aligned along the token axis.
+        return EncoderOutput(tokens=hidden[:, prefix_count:], prefix=hidden[:, :prefix_count])
 
 
 @register_encoder("vit_sup_b")

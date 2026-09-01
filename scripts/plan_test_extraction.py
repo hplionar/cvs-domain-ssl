@@ -38,6 +38,10 @@ ENCODER_BY_ARM = {
     "dinov3_b": "dinov3_b",
     "mae_b": "mae_b",
     "ijepa_h": "ijepa_h",
+    "vit_sup_b": "vit_sup_b",
+    "dinov3_b_trainonly": "dinov3_b",
+    "mae_b_trainonly": "mae_b",
+    "dinov2_b_trainonly": "dinov2_b",
     "videomae_b_base": "videomae_b",
     "videomae_b_adapted": "videomae_b",
     "vjepa2_l_base": "vjepa2_l",
@@ -52,6 +56,10 @@ CHECKPOINT_BY_ARM = {
     "videomae_b_adapted": "outputs/cvs-domain-ssl/ssl/videomae_b_sages/encoder_final.pt",
     "vjepa2_l_adapted": "outputs/cvs-domain-ssl/ssl/vjepa2_l_sages/encoder_final.pt",
     "vjepa2_l_lr1e6": "outputs/cvs-domain-ssl/ssl/vjepa2_l_sages_lr1e6/encoder_final.pt",
+    # The train-only corpus arms, adapted on the 560 training videos alone.
+    "dinov3_b_trainonly": "outputs/cvs-domain-ssl/ssl/dinov3_b_sages_trainonly/encoder_final.pt",
+    "mae_b_trainonly": "outputs/cvs-domain-ssl/ssl/mae_b_sages_trainonly/encoder_final.pt",
+    "dinov2_b_trainonly": "outputs/cvs-domain-ssl/ssl/dinov2_b_sages_trainonly/encoder_final.pt",
 }
 
 HEADER = """#!/bin/bash
