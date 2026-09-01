@@ -32,6 +32,23 @@ from typing import Any
 
 #: cache directory name -> registry encoder name. The manifest records the
 #: checkpoint id but not the registry key that produced it.
+#: The checkpoint each registry name loads when --model-name is not given.
+#: An arm whose recorded checkpoint id differs from this used an explicit
+#: --model-name, and the extraction must repeat it: omitting it silently
+#: substitutes a different model. This happened once with vjepa2_l_base, where
+#: the fpc64 default replaced fpc16 and changed the token grid from [8,16,16]
+#: to [32,16,16]; verify_same_encoder refused the cache, but only after the
+#: GPU time had been spent.
+REGISTRY_DEFAULT = {
+    "dinov2_b": "facebook/dinov2-base",
+    "dinov3_b": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+    "mae_b": "facebook/vit-mae-base",
+    "ijepa_h": "facebook/ijepa_vith14_22k",
+    "vit_sup_b": "google/vit-base-patch16-224",
+    "videomae_b": "MCG-NJU/videomae-base",
+    "vjepa2_l": "facebook/vjepa2-vitl-fpc64-256",
+}
+
 ENCODER_BY_ARM = {
     "dinov2_b": "dinov2_b",
     "dinov2_b_adapted": "dinov2_b",
@@ -116,6 +133,11 @@ def plan_arm(arm: str, cache_root: Path, repo_root: Path, group_root: Path,
 
     # An adapted arm is one whose recorded checkpoint id names a local file.
     is_adapted = "+adapted:" in checkpoint_id
+    # The base checkpoint, with any adaptation marker and resolution suffix
+    # stripped, so that it can be compared against the registry default.
+    base_id = checkpoint_id.split("+adapted:")[0].split("@")[0]
+    registry_default = REGISTRY_DEFAULT.get(ENCODER_BY_ARM.get(arm, ""))
+    needs_model_name = bool(base_id) and base_id != registry_default
     checkpoint_path = None
     if is_adapted:
         rel = CHECKPOINT_BY_ARM.get(arm)
@@ -147,6 +169,10 @@ def plan_arm(arm: str, cache_root: Path, repo_root: Path, group_root: Path,
         f"  --dataset {dataset_key} --split test \\",
         "  --dataset-root $ROOT/datasets/SAGES_CVS_Challenge_2024 \\",
         f"  --manifest-path {manifest} \\",
+    ]
+    if needs_model_name:
+        lines.append(f"  --model-name {base_id} \\")
+    lines += [
     ]
     if checkpoint_path is not None:
         lines.append(f"  --checkpoint $ROOT/{CHECKPOINT_BY_ARM[arm]} \\")
