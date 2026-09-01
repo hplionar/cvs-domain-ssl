@@ -116,6 +116,7 @@ def load_adapted_checkpoint(
     *,
     base_checkpoint: str | None = None,
     fallback_base: str | None = None,
+    model_cls=None,
 ):
     """Rebuild a ``Dinov2Model`` carrying weights from continued pretraining.
 
@@ -139,7 +140,10 @@ def load_adapted_checkpoint(
     one after the fact.
     """
     require_transformers()
-    from transformers import Dinov2Model
+    if model_cls is None:
+        from transformers import Dinov2Model
+
+        model_cls = Dinov2Model
 
     path = Path(path)
     if not path.is_file():
@@ -196,7 +200,7 @@ def load_adapted_checkpoint(
             f"succeed."
         )
 
-    model = Dinov2Model.from_pretrained(base)
+    model = model_cls.from_pretrained(base)
     result = model.load_state_dict(state, strict=False)
 
     missing = list(result.missing_keys)

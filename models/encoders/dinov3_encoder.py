@@ -1,9 +1,10 @@
 """DINOv3 ViT encoder (self-distillation, image level).
 
-Included as a frozen baseline in E1. Adaptation is out of scope: DINO-style
-self-distillation depends on batch statistics for centering and sharpening, so
-gradient accumulation does not substitute for a large true batch on a single
-V100. See docs/implementation_plan.md §10.
+Used both as a frozen baseline and, since a 32 GiB V100 admits the full 2+8
+multi-crop recipe at batch 64, as an adapted arm. ``adapted_checkpoint`` loads a
+teacher backbone exported by ``train/pretrain_dino.py`` through the loader
+shared with DINOv2; the two families are adapted by the same trainer and differ
+only in the model class the state dict is loaded into.
 
 DINOv3 prepends a CLS token *and* register tokens. Register tokens carry no
 spatial position, so treating them as patches would corrupt any attention map
@@ -29,6 +30,9 @@ at project storage will not find it.
 from __future__ import annotations
 
 import torch
+
+from pathlib import Path
+from typing import Any
 
 from models.encoders import register_encoder
 from models.encoders.base_encoder import BaseEncoder, EncoderOutput, PreprocessSpec, TokenLayout
@@ -57,9 +61,33 @@ class DINOv3Encoder(BaseEncoder):
         model_name: str | None = None,
         model=None,
         random_init: bool = False,
+        adapted_checkpoint: str | Path | None = None,
         freeze: bool = True,
     ) -> None:
         super().__init__(freeze=freeze)
+
+        # Continued pretraining is performed by the same trainer that adapts
+        # DINOv2, and exports the same payload -- the teacher backbone under
+        # "model" -- so the loader is shared and only the model class differs.
+        self._adaptation: dict[str, Any] | None = None
+        if adapted_checkpoint is not None:
+            if model is not None or random_init:
+                raise ValueError(
+                    "adapted_checkpoint cannot be combined with model= or "
+                    "random_init=True."
+                )
+            require_transformers()
+            from transformers import DINOv3ViTModel
+
+            from models.encoders.dinov2_encoder import load_adapted_checkpoint
+
+            model, base, self._adaptation = load_adapted_checkpoint(
+                adapted_checkpoint,
+                base_checkpoint=model_name,
+                fallback_base=self.CHECKPOINTS.get(variant),
+                model_cls=DINOv3ViTModel,
+            )
+            model_name = f"{base}+adapted:{Path(adapted_checkpoint).name}"
 
         if model is None and random_init:
             require_transformers()
@@ -102,6 +130,14 @@ class DINOv3Encoder(BaseEncoder):
             num_prefix_tokens=1 + num_registers,
         )
         self._finalise_init()
+
+    def describe(self) -> dict:
+        """Recorded in the cache manifest, so that an adapted cache is
+        distinguishable from a baseline one after the fact."""
+        record = super().describe()
+        if getattr(self, "_adaptation", None) is not None:
+            record["adaptation"] = self._adaptation
+        return record
 
     @property
     def preprocess_spec(self) -> PreprocessSpec:

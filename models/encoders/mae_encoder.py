@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import torch
 
+from pathlib import Path
+from typing import Any
+
 from models.encoders import register_encoder
 from models.encoders.base_encoder import BaseEncoder, EncoderOutput, PreprocessSpec, TokenLayout
 from models.encoders.hf_common import (
@@ -42,9 +45,36 @@ class MAEEncoder(BaseEncoder):
         model_name: str | None = None,
         model=None,
         random_init: bool = False,
+        adapted_checkpoint: str | Path | None = None,
         freeze: bool = True,
     ) -> None:
         super().__init__(freeze=freeze)
+
+        # pretrain_mae.py exports the same payload shape as pretrain_dino.py --
+        # the encoder under "model", with step and config alongside -- so the
+        # loader is shared. What differs is that it saves ``model.vit``, the
+        # inner ViT of a ViTMAEForPreTraining, whereas extraction wants a
+        # ViTMAEModel; the loader's missing-key check will refuse the checkpoint
+        # rather than load a partial one if the two disagree.
+        self._adaptation: dict[str, Any] | None = None
+        if adapted_checkpoint is not None:
+            if model is not None or random_init:
+                raise ValueError(
+                    "adapted_checkpoint cannot be combined with model= or "
+                    "random_init=True."
+                )
+            require_transformers()
+            from transformers import ViTMAEModel
+
+            from models.encoders.dinov2_encoder import load_adapted_checkpoint
+
+            model, base, self._adaptation = load_adapted_checkpoint(
+                adapted_checkpoint,
+                base_checkpoint=model_name,
+                fallback_base=self.CHECKPOINTS.get(variant),
+                model_cls=ViTMAEModel,
+            )
+            model_name = f"{base}+adapted:{Path(adapted_checkpoint).name}"
 
         if model is None and random_init:
             require_transformers()
@@ -89,6 +119,14 @@ class MAEEncoder(BaseEncoder):
             grid=(h, w), dim=int(cfg_get(cfg, "hidden_size")), num_prefix_tokens=1
         )
         self._finalise_init()
+
+    def describe(self) -> dict:
+        """Recorded in the cache manifest, so that an adapted cache is
+        distinguishable from a baseline one after the fact."""
+        record = super().describe()
+        if getattr(self, "_adaptation", None) is not None:
+            record["adaptation"] = self._adaptation
+        return record
 
     @property
     def preprocess_spec(self) -> PreprocessSpec:
