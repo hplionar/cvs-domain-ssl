@@ -102,6 +102,11 @@ def main() -> int:
     p.add_argument("--tolerance", type=float, default=1e-4,
                    help="allowed |recomputed - saved| validation mAP")
     p.add_argument("--output-name", default="test_metrics.json")
+    p.add_argument("--logits-prefix", default="test_logits",
+                   help="filename stem for the saved logits. Two evaluations of "
+                        "the same arm against different test caches would "
+                        "otherwise collide, silently replacing one set with the "
+                        "other while leaving both metrics files in place.")
     p.add_argument("--device", default="cuda")
     p.add_argument("--in-memory", action="store_true", default=None)
     args = p.parse_args()
@@ -160,7 +165,8 @@ def main() -> int:
             continue
 
         logits, targets = infer(head, test_loader, device)
-        np.savez(probe_dir / f"test_logits_seed{seed}.npz", logits=logits, targets=targets)
+        np.savez(probe_dir / f"{args.logits_prefix}_seed{seed}.npz",
+                 logits=logits, targets=targets)
         metrics = compute_multilabel_metrics_from_logits(targets, logits)
         per_seed.append({
             "seed": seed,
