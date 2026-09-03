@@ -162,11 +162,55 @@ class DINOv3Encoder(BaseEncoder):
         layer_depths: tuple[float, ...] | None = None,
     ) -> EncoderOutput:
         if layer_depths is not None:
-            raise NotImplementedError(
-                "DINOv3ViTEncoder does not yet support layer_depths. "
-                "Returning the final layer silently would make a depth "
-                "comparison meaningless."
+            from models.encoders.base_encoder import resolve_layer_indices
+
+            out = self.model(pixel_values=x, output_hidden_states=True)
+            n_prefix = self._layout.num_prefix_tokens
+            indices = resolve_layer_indices(
+                layer_depths, self.model.config.num_hidden_layers
             )
+            # Two adjustments, both required for a depth comparison to be a
+            # comparison of depth alone.
+            #
+            # Prefix stripping: unlike VideoMAE, every DINOv3 hidden state
+            # carries a CLS token and four registers, and the base class
+            # requires them removed from each selected layer so the spatial
+            # layout is identical along the layer axis.
+            #
+            # Final normalisation: ``hidden_states`` holds each block's raw
+            # output, whereas ``last_hidden_state`` is the final block's output
+            # after the model's terminal LayerNorm. Without applying it, depth
+            # 1.0 would not reproduce the tensor every other experiment in this
+            # project cached, and the depths would differ in scale as well as in
+            # depth. Applying a normalisation fitted for block 12 to block 3 is
+            # not neutral, but the alternative confounds depth with feature
+            # scale, which is worse; the choice is recorded in the manifest by
+            # way of layer_depths being set.
+            norm = getattr(self.model, "layernorm", None) or getattr(
+                self.model, "norm", None
+            )
+            if norm is None:
+                raise RuntimeError(
+                    "No terminal LayerNorm found on the DINOv3 model, so the "
+                    "selected layers cannot be brought onto the same scale as "
+                    "last_hidden_state."
+                )
+            selected = torch.stack(
+                [norm(out.hidden_states[i])[:, n_prefix:, :] for i in indices],
+                dim=1,
+            )
+            hidden = out.last_hidden_state
+            expected = self._layout.num_tokens + n_prefix
+            if hidden.shape[1] != expected:
+                raise RuntimeError(
+                    f"DINOv3 returned {hidden.shape[1]} tokens, expected {expected}."
+                )
+            return EncoderOutput(
+                tokens=hidden[:, n_prefix:, :],
+                prefix=hidden[:, :n_prefix, :],
+                hidden_states=selected,
+            )
+
         hidden = self.model(pixel_values=x).last_hidden_state
         n_prefix = self._layout.num_prefix_tokens
         expected = self._layout.num_tokens + n_prefix

@@ -2,7 +2,7 @@
 #SBATCH --job-name=finetune_smoke
 #SBATCH --account=pmc085
 #SBATCH --partition=ondemand-gpu
-#SBATCH --gres=gpu:v100-32gb:1
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=00:40:00
