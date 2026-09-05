@@ -150,6 +150,50 @@ class LSTMHead(nn.Module):
         return self.fc(self.drop(out[:, -1]))
 
 
+class TransformerHead(nn.Module):
+    """LayerNorm, a transformer encoder layer, linear on the labelled step.
+
+    The recurrent head processes the window in order and reads its final state;
+    this one attends over the window and reads the position of the labelled
+    frame. The difference that matters is that attention can weight a frame five
+    steps back as heavily as the one immediately preceding, where a recurrence
+    must pass information through every intervening step.
+
+    Learned positional embeddings are added because the window is ordered and
+    self-attention is not. Without them the head would be a set function, which
+    would confound "does order matter" with "does context matter" -- and the
+    recurrent result already shows context contributes something, so the
+    question here is whether the way it is combined is what limits the gain.
+
+    Kept deliberately small: one layer, four heads. Eighteen steps of a
+    768-dimensional sequence with 10,080 training windows does not support more,
+    and a larger head would confound capacity with architecture.
+    """
+
+    def __init__(self, dim: int, hidden: int, dropout: float,
+                 heads: int = 4, layers: int = 1) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.project = nn.Linear(dim, hidden)
+        self.position = nn.Parameter(torch.zeros(1, 64, hidden))
+        nn.init.trunc_normal_(self.position, std=0.02)
+        layer = nn.TransformerEncoderLayer(
+            d_model=hidden, nhead=heads, dim_feedforward=2 * hidden,
+            dropout=dropout, batch_first=True, norm_first=True,
+            activation="gelu")
+        self.encoder = nn.TransformerEncoder(layer, num_layers=layers)
+        self.drop = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden, 3)
+
+    def forward(self, x):
+        h = self.project(self.norm(x))
+        h = h + self.position[:, : h.shape[1]]
+        h = self.encoder(h)
+        # The last position is the labelled frame, as in the recurrent head, so
+        # that the two differ only in how the window is combined.
+        return self.fc(self.drop(h[:, -1]))
+
+
 @torch.no_grad()
 def infer(model, loader, device):
     model.eval()
@@ -160,9 +204,14 @@ def infer(model, loader, device):
     return np.concatenate(logits), np.concatenate(targets)
 
 
-def train_one(config, seed, train_ds, val_ds, dim, epochs, patience, device):
+HEADS = {"lstm": LSTMHead, "transformer": TransformerHead}
+
+
+def train_one(config, seed, train_ds, val_ds, dim, epochs, patience, device,
+              head_name="lstm"):
     set_seed(seed)
-    head = LSTMHead(dim, int(config["hidden"]), float(config["dropout"])).to(device)
+    head = HEADS[head_name](dim, int(config["hidden"]),
+                            float(config["dropout"])).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=float(config["lr"]),
                             weight_decay=float(config["weight_decay"]))
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -204,6 +253,11 @@ def main() -> int:
     p.add_argument("--test-manifest", default=None,
                    help="manifest covering the test cache, if it differs")
     p.add_argument("--windows", type=int, nargs="+", default=[1, 3, 5, 9, 18])
+    p.add_argument("--head", default="lstm", choices=sorted(HEADS),
+                   help="how the window is combined. The recurrent head reads "
+                        "its final state; the transformer attends over the "
+                        "window and reads the labelled position. Both reduce to "
+                        "the frozen probe at k = 1.")
     p.add_argument("--seeds", type=int, default=3)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--patience", type=int, default=20)
@@ -233,6 +287,7 @@ def main() -> int:
             for dr in (0.0, 0.1) for h in (256,)]
 
     print(f"encoder     {train_cache.manifest['encoder']['checkpoint_id']}")
+    print(f"head        {args.head}")
     print(f"features    {dim}-dim, {len(train_x)} train / {len(val_x)} val"
           + (f" / {len(test_x)} test" if test_x is not None else ""))
     print(f"grid        {len(grid)} configs x {args.seeds} seeds per window")
@@ -252,7 +307,8 @@ def main() -> int:
         # are comparable; the test split is scored once afterwards.
         best_cfg, best_score, best_runs = None, -1.0, None
         for cfg in grid:
-            runs = [train_one(cfg, s, tr_ds, va_ds, dim, args.epochs, args.patience, device)
+            runs = [train_one(cfg, s, tr_ds, va_ds, dim, args.epochs,
+                              args.patience, device, args.head)
                     for s in range(args.seeds)]
             mean = float(np.mean([r[0] for r in runs]))
             if mean > best_score:
@@ -272,7 +328,8 @@ def main() -> int:
             te_loader = DataLoader(te_ds, batch_size=512, shuffle=False, num_workers=0)
             scores = []
             for _, _, state in best_runs:
-                head = LSTMHead(dim, int(best_cfg["hidden"]), float(best_cfg["dropout"])).to(device)
+                head = HEADS[args.head](dim, int(best_cfg["hidden"]),
+                                        float(best_cfg["dropout"])).to(device)
                 head.load_state_dict(state)
                 logits, targets = infer(head, te_loader, device)
                 scores.append(compute_multilabel_metrics_from_logits(targets, logits))
@@ -303,9 +360,10 @@ def main() -> int:
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / "temporal_probe.json", "w", encoding="utf-8") as fh:
+    results["head"] = args.head
+    with open(out_dir / f"temporal_probe_{args.head}.json", "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2)
-    print(f"\nwritten to {out_dir/'temporal_probe.json'}")
+    print(f"\nwritten to {out_dir / f'temporal_probe_{args.head}.json'}")
     return 0
 
 
