@@ -164,13 +164,47 @@ class MAEEncoder(BaseEncoder):
         *,
         layer_depths: tuple[float, ...] | None = None,
     ) -> EncoderOutput:
+        # The monotonic noise is what keeps ViT-MAE's masking from permuting
+        # the patch order, so it is passed on every path including this one.
+        # output_hidden_states does not change the masking, but omitting the
+        # noise would.
+        out = self.model(
+            pixel_values=x,
+            noise=self._monotonic_noise(x.shape[0], x.device),
+            output_hidden_states=layer_depths is not None,
+        )
         if layer_depths is not None:
-            raise NotImplementedError(
-                "ViTMAEEncoder does not yet support layer_depths. "
-                "Returning the final layer silently would make a depth "
-                "comparison meaningless."
+            from models.encoders.base_encoder import resolve_layer_indices
+
+            n_prefix = self._layout.num_prefix_tokens
+            indices = resolve_layer_indices(
+                layer_depths, self.model.config.num_hidden_layers
             )
-        out = self.model(pixel_values=x, noise=self._monotonic_noise(x.shape[0], x.device))
+            # Two adjustments, both needed for a depth comparison to compare
+            # depth alone. The CLS token is stripped from every selected layer,
+            # which the base class requires so the spatial layout is identical
+            # along the layer axis. And the terminal LayerNorm is applied:
+            # hidden_states holds each block's raw output while last_hidden_state
+            # is the final block after that norm, so without it depth 1.0 would
+            # not reproduce the tensor every other experiment cached and the
+            # depths would differ in scale as well as in depth. Applying a norm
+            # fitted for block 12 to block 3 is not neutral, but the alternative
+            # confounds depth with feature scale, which is worse.
+            norm = getattr(self.model, "layernorm", None) or getattr(
+                self.model, "norm", None
+            )
+            if norm is None:
+                raise RuntimeError(
+                    "No terminal LayerNorm found on the ViT-MAE model, so the "
+                    "selected layers cannot be brought onto the same scale as "
+                    "last_hidden_state."
+                )
+            selected = torch.stack(
+                [norm(out.hidden_states[i])[:, n_prefix:, :] for i in indices],
+                dim=1,
+            )
+        else:
+            selected = None
         hidden = out.last_hidden_state
 
         expected = self._layout.num_tokens + self._layout.num_prefix_tokens
@@ -193,7 +227,8 @@ class MAEEncoder(BaseEncoder):
                     "implementation has changed and this wrapper needs updating."
                 )
 
-        return EncoderOutput(tokens=hidden[:, 1:, :], prefix=hidden[:, :1, :])
+        return EncoderOutput(tokens=hidden[:, 1:, :], prefix=hidden[:, :1, :],
+                             hidden_states=selected)
 
 
 @register_encoder("mae_b")

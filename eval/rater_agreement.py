@@ -221,12 +221,19 @@ def score_stratum(
 
 
 def evaluate_arm(
-    name: str, probe_dir: Path, cache_dir: Path, meta: pd.DataFrame
+    name: str, probe_dir: Path, cache_dir: Path, meta: pd.DataFrame,
+    logits_prefix: str = "val_logits",
 ) -> dict[str, Any]:
-    """Score one arm on the full split and on each agreement stratum."""
-    logit_files = sorted(probe_dir.glob("val_logits_seed*.npz"))
+    """Score one arm on the full split and on each agreement stratum.
+
+    The prefix is a parameter because an arm scored against more than one test
+    cache writes to distinct filenames, and reading the wrong one would compare
+    the right arm on the wrong split. The row-count check below catches that
+    when the splits differ in size, but not when they happen to match.
+    """
+    logit_files = sorted(probe_dir.glob(f"{logits_prefix}_seed*.npz"))
     if not logit_files:
-        raise FileNotFoundError(f"No val_logits_seed*.npz in {probe_dir}")
+        raise FileNotFoundError(f"No {logits_prefix}_seed*.npz in {probe_dir}")
 
     sample_ids = read_cache_sample_ids(cache_dir)
     meta_indexed = meta.set_index("sample_id")
@@ -359,12 +366,23 @@ def main() -> int:
     p.add_argument("--output-dir", required=True)
     p.add_argument("--arm", action="append", default=[], type=parse_arm,
                    help="name=probe_dir:cache_dir (repeatable)")
+    p.add_argument("--split-column", default=None,
+                   help="the manifest column holding the split. Defaults to "
+                        "internal_split, which the official-test manifest does "
+                        "not have; it uses split.")
+    p.add_argument("--logits-prefix", default="test_logits",
+                   help="filename stem of the saved logits. An arm scored "
+                        "against more than one test cache writes to distinct "
+                        "prefixes, and reading the wrong one would silently "
+                        "compare the right arm on the wrong split.")
     args = p.parse_args()
 
     meta = pd.read_csv(args.manifest)
-    if "internal_split" not in meta.columns:
-        raise ValueError("Manifest has no internal_split column.")
-    split_df = meta if args.split == "all" else meta[meta.internal_split == args.split]
+    column = args.split_column or (
+        "internal_split" if "internal_split" in meta.columns else "split")
+    if args.split != "all" and column not in meta.columns:
+        raise ValueError(f"Manifest has no {column} column; pass --split-column.")
+    split_df = meta if args.split == "all" else meta[meta[column] == args.split]
     if split_df.empty:
         raise ValueError(f"No rows for split={args.split}.")
 
@@ -375,7 +393,8 @@ def main() -> int:
     arms = []
     for name, probe_dir, cache_dir in args.arm:
         try:
-            arms.append(evaluate_arm(name, probe_dir, cache_dir, meta))
+            arms.append(evaluate_arm(name, probe_dir, cache_dir, meta,
+                                     logits_prefix=args.logits_prefix))
         except (FileNotFoundError, ValueError) as exc:
             print(f"\n[skipped] {name}: {exc}")
     print_arms(arms, ceiling)

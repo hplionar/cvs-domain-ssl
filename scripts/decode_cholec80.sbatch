@@ -17,6 +17,9 @@
 # No GPU: this is ffmpeg and file I/O.
 
 set -euo pipefail
+
+# ffmpeg is not on the default PATH of the compute nodes.
+module load ffmpeg/8.0.1
 ROOT=/group/pmc085/hlionar
 SRC=$ROOT/datasets/cholec80/videos
 OUT=$ROOT/datasets/cholec80/derived_ssl/frames
