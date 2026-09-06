@@ -83,10 +83,10 @@ def transformer_blocks(encoder: nn.Module) -> list[nn.Module]:
     like fine-tuning and is not.
     """
     inner = getattr(encoder, "model", encoder)
-    # Verified against the checkpoints in use rather than assumed: DINOv3ViTModel
-    # nests its stack at .model.layer, ViTMAEModel exposes .layers, and the
-    # Dinov2 and ViT families use .encoder.layer. Ordered most specific first so
-    # that a nested match is not shadowed by a shallower one.
+    # Verified against the checkpoints in use: DINOv3ViTModel nests its stack
+    # at .model.layer, ViTMAEModel exposes .layers, and the Dinov2 and ViT
+    # families use .encoder.layer. Ordered most specific first so that a nested
+    # match is not shadowed by a shallower one.
     for path in (("model", "layer"), ("layers",), ("encoder", "layer"),
                  ("layer",), ("encoder", "layers"), ("blocks",),
                  ("encoder", "blocks")):
@@ -156,17 +156,6 @@ class FineTuneModel(nn.Module):
         return self.head(out.tokens.mean(dim=1))
 
 
-def collate(batch):
-    """Keep only the image and the target.
-
-    SAGESFrameDataset returns fourteen keys, most of them strings used for
-    provenance. The default collate would batch those into lists and carry them
-    through every worker; nothing downstream reads them here.
-    """
-    return (torch.stack([b["image"] for b in batch]),
-            torch.stack([torch.as_tensor(b["target"]) for b in batch]))
-
-
 def build_loaders(args, spec):
     from data.sages_datasets import SAGESFrameDataset
 
@@ -177,11 +166,9 @@ def build_loaders(args, spec):
     val = SAGESFrameDataset(split="val", **common)
     return (
         DataLoader(train, batch_size=args.batch_size, shuffle=True,
-                   num_workers=args.num_workers, pin_memory=True, drop_last=True,
-                   collate_fn=collate),
+                   num_workers=args.num_workers, pin_memory=True, drop_last=True),
         DataLoader(val, batch_size=args.batch_size * 2, shuffle=False,
-                   num_workers=args.num_workers, pin_memory=True,
-                   collate_fn=collate),
+                   num_workers=args.num_workers, pin_memory=True),
     )
 
 
@@ -212,6 +199,15 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--encoder", required=True, help="registry name, e.g. dinov3_b")
+    p.add_argument("--from-scratch", action="store_true",
+                   help="discard the pretrained weights and reinitialise the "
+                        "encoder, keeping its architecture. The control that "
+                        "says what pretraining is worth: Kornblith et al. find "
+                        "fine-tuning beats random initialisation by 0.6 points "
+                        "on Stanford Cars and 0.2 on FGVC Aircraft, both tasks "
+                        "whose concepts ImageNet does not contain, while buying "
+                        "a seventeenfold convergence speedup. Whether the same "
+                        "holds here is untested.")
     p.add_argument("--checkpoint", default=None,
                    help="adapted encoder weights, if fine-tuning an adapted arm")
     p.add_argument("--dataset-root", required=True)
@@ -240,8 +236,30 @@ def main() -> int:
         kwargs["adapted_checkpoint"] = args.checkpoint
     encoder = build_encoder(args.encoder, **kwargs)
 
+    if args.from_scratch:
+        if args.checkpoint:
+            raise SystemExit("--from-scratch and --checkpoint are exclusive: "
+                             "one discards the weights the other loads.")
+        # Reinitialise in place rather than constructing from config, so that
+        # the architecture, preprocessing and token layout are identical to the
+        # pretrained arm by construction and the only difference is the weights.
+        # HuggingFace's _init_weights implements each model's published
+        # initialisation, so this is the initialisation the checkpoint itself
+        # started from.
+        inner = getattr(encoder, "model", encoder)
+        inner.apply(inner._init_weights)
+        if hasattr(inner, "post_init"):
+            inner.post_init()
+        print("encoder reinitialised: pretrained weights discarded")
+
     frozen_control = args.backbone_lr <= 0
     n_blocks = 0 if frozen_control else args.unfreeze_blocks
+    if args.from_scratch and n_blocks < len(transformer_blocks(encoder)):
+        # Freezing randomly initialised blocks would measure a random projection
+        # rather than training from scratch, so every block is unfrozen and the
+        # count is reported rather than silently overridden.
+        n_blocks = len(transformer_blocks(encoder))
+        print(f"from scratch: all {n_blocks} blocks unfrozen")
     trainable, frozen = unfreeze_last_blocks(encoder, n_blocks)
 
     model = FineTuneModel(encoder, encoder.token_layout.dim, args.dropout).to(device)
@@ -258,7 +276,8 @@ def main() -> int:
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
     criterion = nn.BCEWithLogitsLoss()
 
-    print(f"encoder        {encoder.checkpoint_id}")
+    print(f"encoder        {encoder.checkpoint_id}"
+          + ("  [weights discarded]" if args.from_scratch else ""))
     print(f"blocks         {n_blocks} of {len(transformer_blocks(encoder))} unfrozen"
           + ("  (frozen control)" if frozen_control else ""))
     print(f"parameters     {trainable:,} trainable, {frozen:,} frozen, "
@@ -311,7 +330,9 @@ def main() -> int:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.json", "w", encoding="utf-8") as fh:
-        json.dump({"encoder": encoder.checkpoint_id, "args": vars(args),
+        json.dump({"encoder": encoder.checkpoint_id,
+                   "from_scratch": bool(args.from_scratch),
+                   "args": vars(args),
                    "blocks_unfrozen": n_blocks, "trainable_params": trainable,
                    "best_val_map": best, "best_epoch": best_epoch,
                    "elapsed_hours": elapsed / 3600, "history": history}, fh, indent=2)
