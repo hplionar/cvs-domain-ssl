@@ -104,7 +104,8 @@ def transformer_blocks(encoder: nn.Module) -> list[nn.Module]:
     )
 
 
-def unfreeze_last_blocks(encoder: nn.Module, n: int) -> tuple[int, int]:
+def unfreeze_last_blocks(encoder: nn.Module, n: int,
+                         embeddings: bool = False) -> tuple[int, int]:
     """Unfreeze the final n blocks and the final normalisation layer.
 
     The final norm is included because it sits after the last block and its
@@ -113,10 +114,12 @@ def unfreeze_last_blocks(encoder: nn.Module, n: int) -> tuple[int, int]:
     """
     for p in encoder.parameters():
         p.requires_grad_(False)
-    if n <= 0:
-        return 0, sum(p.numel() for p in encoder.parameters())
 
     blocks = transformer_blocks(encoder)
+    if n < 0:
+        n = len(blocks)
+    if n == 0 and not embeddings:
+        return 0, sum(p.numel() for p in encoder.parameters())
     if n > len(blocks):
         raise SystemExit(f"--unfreeze-blocks {n} exceeds the {len(blocks)} blocks "
                          f"this encoder has.")
@@ -131,6 +134,19 @@ def unfreeze_last_blocks(encoder: nn.Module, n: int) -> tuple[int, int]:
             for p in mod.parameters():
                 p.requires_grad_(True)
             break
+
+    if embeddings:
+        # A randomly initialised patch projection left frozen would mean the
+        # model never trains from scratch: the transformer would sit on a fixed
+        # random projection of pixels.
+        emb = getattr(inner, "embeddings", None)
+        if emb is None:
+            raise RuntimeError(
+                f"No embeddings module on {type(inner).__name__}, so the patch "
+                f"projection cannot be unfrozen."
+            )
+        for p in emb.parameters():
+            p.requires_grad_(True)
 
     trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
     frozen = sum(p.numel() for p in encoder.parameters() if not p.requires_grad)
@@ -216,7 +232,15 @@ def main() -> int:
     p.add_argument("--backbone-lr", type=float, default=1e-5,
                    help="0 freezes the encoder, which is the control")
     p.add_argument("--head-lr", type=float, default=1e-3)
-    p.add_argument("--unfreeze-blocks", type=int, default=4)
+    p.add_argument("--unfreeze-blocks", type=int, default=4,
+                   help="trailing transformer blocks to update. -1 unfreezes "
+                        "every block, which is what --from-scratch forces and "
+                        "what a pretrained control must match to be comparable.")
+    p.add_argument("--unfreeze-embeddings", action="store_true",
+                   help="also update the patch-embedding projection and prefix "
+                        "tokens. Implied by --from-scratch: a frozen random "
+                        "embedding would leave the model training on a fixed "
+                        "random projection of pixels.")
     p.add_argument("--weight-decay", type=float, default=0.05)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--epochs", type=int, default=10)
@@ -254,13 +278,14 @@ def main() -> int:
 
     frozen_control = args.backbone_lr <= 0
     n_blocks = 0 if frozen_control else args.unfreeze_blocks
-    if args.from_scratch and n_blocks < len(transformer_blocks(encoder)):
-        # Freezing randomly initialised blocks would measure a random projection
-        # rather than training from scratch, so every block is unfrozen and the
-        # count is reported rather than silently overridden.
-        n_blocks = len(transformer_blocks(encoder))
-        print(f"from scratch: all {n_blocks} blocks unfrozen")
-    trainable, frozen = unfreeze_last_blocks(encoder, n_blocks)
+    unfreeze_emb = args.unfreeze_embeddings
+    if args.from_scratch:
+        # Every parameter is random, so freezing any of it would measure a fixed
+        # random projection. Reported rather than applied silently, because a
+        # pretrained control must be given the same settings to be comparable.
+        n_blocks, unfreeze_emb = -1, True
+        print("from scratch: every block and the patch embedding unfrozen")
+    trainable, frozen = unfreeze_last_blocks(encoder, n_blocks, unfreeze_emb)
 
     model = FineTuneModel(encoder, encoder.token_layout.dim, args.dropout).to(device)
     train_loader, val_loader = build_loaders(args, encoder.preprocess_spec)
