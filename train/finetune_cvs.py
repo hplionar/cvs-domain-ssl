@@ -173,13 +173,28 @@ class FineTuneModel(nn.Module):
 
 
 def build_loaders(args, spec):
-    from data.sages_datasets import SAGESFrameDataset
+    """Training and validation loaders for whichever dataset was named.
 
+    The two classes take the same arguments except that Endoscapes needs a mode:
+    its manifest holds every decoded frame and only the CVS-annotated keyframes
+    carry targets, so "supervised" is what selects them. Asking for the same
+    frames the extraction pipeline used, rather than a second selection rule,
+    is what keeps a fine-tuned arm comparable to its frozen counterpart.
+    """
     transform = build_transform_from_spec(spec)
     common = dict(manifest_path=args.manifest_path, dataset_root=args.dataset_root,
                   transform=transform)
-    train = SAGESFrameDataset(split="train", **common)
-    val = SAGESFrameDataset(split="val", **common)
+
+    if args.dataset == "endoscapes":
+        from data.datasets import EndoscapesDataset
+
+        train = EndoscapesDataset(split="train", mode="supervised", **common)
+        val = EndoscapesDataset(split="val", mode="supervised", **common)
+    else:
+        from data.sages_datasets import SAGESFrameDataset
+
+        train = SAGESFrameDataset(split="train", **common)
+        val = SAGESFrameDataset(split="val", **common)
     return (
         DataLoader(train, batch_size=args.batch_size, shuffle=True,
                    num_workers=args.num_workers, pin_memory=True, drop_last=True),
@@ -226,6 +241,9 @@ def main() -> int:
                         "holds here is untested.")
     p.add_argument("--checkpoint", default=None,
                    help="adapted encoder weights, if fine-tuning an adapted arm")
+    p.add_argument("--dataset", default="sages", choices=("sages", "endoscapes"),
+                   help="which dataset the manifest describes. Endoscapes needs "
+                        "its own loader and selects annotated keyframes by mode.")
     p.add_argument("--dataset-root", required=True)
     p.add_argument("--manifest-path", required=True)
     p.add_argument("--output-dir", required=True)

@@ -262,6 +262,34 @@ class TrainState:
     history: list[dict[str, float]] = field(default_factory=list)
 
 
+
+def _transformer_blocks(backbone) -> list:
+    """The backbone's sequence of transformer blocks.
+
+    Located by structure rather than by name: DINOv3ViTModel nests its stack at
+    .model.layer, ViTMAEModel exposes .layers, and the Dinov2 and ViT families
+    use .encoder.layer. Raising rather than returning an empty list, because
+    freezing nothing while reporting success would produce a run that looks like
+    the experiment and is not.
+    """
+    inner = getattr(backbone, "model", backbone)
+    for path in (("model", "layer"), ("layers",), ("encoder", "layer"),
+                 ("layer",), ("encoder", "layers"), ("blocks",)):
+        node = inner
+        for attr in path:
+            node = getattr(node, attr, None)
+            if node is None:
+                break
+        if node is not None and isinstance(
+            node, (torch.nn.ModuleList, torch.nn.Sequential)
+        ):
+            return list(node)
+    raise RuntimeError(
+        f"Could not locate the transformer blocks of {type(inner).__name__}; "
+        f"add its attribute path to _transformer_blocks()."
+    )
+
+
 def save_checkpoint(path: Path, *, student, teacher, criterion, optimizer,
                     scaler, state: TrainState, config: dict[str, Any]) -> None:
     """Write a checkpoint that restores training exactly.
@@ -382,6 +410,35 @@ def build_models(config: dict[str, Any], device: torch.device):
     for param in teacher.parameters():
         param.requires_grad = False
 
+    freeze_last = int(config["model"].get("freeze_last_blocks", 0))
+    if freeze_last:
+        blocks = _transformer_blocks(student.backbone)
+        if freeze_last > len(blocks):
+            raise SystemExit(
+                f"freeze_last_blocks={freeze_last} exceeds the {len(blocks)} "
+                f"blocks this backbone has."
+            )
+        n_frozen = 0
+        for block in blocks[-freeze_last:]:
+            for param in block.parameters():
+                param.requires_grad = False
+                n_frozen += param.numel()
+        # The terminal norm sits after the last block and is frozen with it:
+        # leaving it trainable would let the loss rescale the output of blocks
+        # it cannot otherwise reach, which is the effect being tested.
+        inner = getattr(student.backbone, "model", student.backbone)
+        for name in ("layernorm", "norm", "final_layernorm"):
+            mod = getattr(inner, name, None)
+            if isinstance(mod, torch.nn.Module):
+                for param in mod.parameters():
+                    param.requires_grad = False
+                    n_frozen += param.numel()
+                break
+        trainable = sum(p.numel() for p in student.parameters() if p.requires_grad)
+        print(f"froze the last {freeze_last} of {len(blocks)} blocks and the "
+              f"terminal norm: {n_frozen:,} parameters held fixed, "
+              f"{trainable:,} trainable")
+
     if config["model"].get("gradient_checkpointing", False):
         student.backbone.gradient_checkpointing_enable()
 
@@ -484,8 +541,12 @@ def main() -> int:
         centre_momentum=float(train_cfg.get("centre_momentum", 0.9)),
     ).to(device)
 
+    # Frozen parameters are excluded rather than passed with requires_grad
+        # False: AdamW would otherwise allocate moment buffers for them, and
+        # weight decay is applied to parameters in the group regardless of
+        # whether they receive gradients.
     optimizer = torch.optim.AdamW(
-        student.parameters(), lr=base_lr,
+        [p for p in student.parameters() if p.requires_grad], lr=base_lr,
         betas=tuple(train_cfg.get("betas", (0.9, 0.999))),
         weight_decay=float(train_cfg.get("weight_decay", 0.04)),
     )
