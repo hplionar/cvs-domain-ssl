@@ -253,6 +253,11 @@ def main() -> int:
     p.add_argument("--test-manifest", default=None,
                    help="manifest covering the test cache, if it differs")
     p.add_argument("--windows", type=int, nargs="+", default=[1, 3, 5, 9, 18])
+    p.add_argument("--logits-prefix", default="test_logits_official",
+                   help="filename stem for the per-window predictions. Distinct "
+                        "prefixes keep scorings against different test caches "
+                        "apart; reading the wrong one would compare the right "
+                        "window on the wrong split.")
     p.add_argument("--head", default="lstm", choices=sorted(HEADS),
                    help="how the window is combined. The recurrent head reads "
                         "its final state; the transformer attends over the "
@@ -327,12 +332,25 @@ def main() -> int:
             te_ds = TrailingWindows(test_x, test_y, te_order, k)
             te_loader = DataLoader(te_ds, batch_size=512, shuffle=False, num_workers=0)
             scores = []
-            for _, _, state in best_runs:
+            for seed_index, (_, _, state) in enumerate(best_runs):
                 head = HEADS[args.head](dim, int(best_cfg["hidden"]),
                                         float(best_cfg["dropout"])).to(device)
                 head.load_state_dict(state)
                 logits, targets = infer(head, te_loader, device)
                 scores.append(compute_multilabel_metrics_from_logits(targets, logits))
+                # Persisted because two later analyses need the predictions and
+                # not the summary. A paired bootstrap over videos on k against
+                # k = 1 cancels the variance the two windows share, which a
+                # seed standard deviation cannot express; and disagreement
+                # between the window's predictions can only be scored from the
+                # predictions themselves. Recomputing these means refitting the
+                # whole grid, so they are written once here.
+                window_dir = Path(args.output_dir) / f"k{k}"
+                window_dir.mkdir(parents=True, exist_ok=True)
+                np.savez(
+                    window_dir / f"{args.logits_prefix}_seed{seed_index}.npz",
+                    logits=logits, targets=targets,
+                )
             entry["test"] = {m: {"mean": float(np.mean([s[m] for s in scores])),
                                  "sd": float(np.std([s[m] for s in scores], ddof=1))}
                              for m in scores[0]}
