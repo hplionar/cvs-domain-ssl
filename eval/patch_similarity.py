@@ -72,13 +72,36 @@ def read_index(cache_dir: Path) -> list[str]:
     return [r["sample_id"] for r in rows]
 
 
-def frame_statistics(cache_dir: Path) -> dict[str, np.ndarray]:
+def frame_statistics(cache_dir: Path, layer: int | None = None
+                     ) -> dict[str, np.ndarray]:
     """Per-frame token statistics, computed in blocks.
 
     Returns arrays of length N: mean pairwise cosine, effective rank, and the
     coefficient of variation of the token norms.
+
+    With `layer`, reads one depth from a cache extracted with --layer-depths.
+    Without it, reads tokens.npy -- which holds the encoder's final block
+    whatever depths were requested, so pointing this at a depth cache without a
+    layer index would measure block 12 once per depth and report it as four
+    different blocks.
     """
-    tokens = np.load(cache_dir / "tokens.npy", mmap_mode="r")
+    if layer is None:
+        tokens = np.load(cache_dir / "tokens.npy", mmap_mode="r")
+    else:
+        layers_path = cache_dir / "layers.npy"
+        if not layers_path.is_file():
+            raise SystemExit(
+                f"--layer given but {cache_dir} has no layers.npy. Re-extract "
+                f"with --layer-depths, or drop --layer to read the final block."
+            )
+        manifest = json.loads((cache_dir / "manifest.json").read_text())
+        depths = manifest.get("layer_depths") or []
+        if layer >= len(depths):
+            raise SystemExit(
+                f"--layer {layer} but {cache_dir} holds {len(depths)} "
+                f"depths: {depths}"
+            )
+        tokens = np.load(layers_path, mmap_mode="r")[:, layer]
     n, n_patches, dim = tokens.shape
     block = max(1, int(BLOCK_BYTES // max(n_patches * dim * 4, 1)))
 
@@ -135,6 +158,10 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--arm", action="append", required=True, type=parse_arm,
                    help="name=cache_dir (repeatable; two or more)")
+    p.add_argument("--layer", type=int, default=None,
+                   help="index into a depth cache's layer axis, for caches "
+                        "extracted with --layer-depths. Omitted, the final "
+                        "block is read.")
     p.add_argument("--manifest", required=True)
     p.add_argument("--output-dir", required=True)
     args = p.parse_args()
@@ -152,7 +179,7 @@ def main() -> int:
                 f"first arm. The comparison requires identical frames."
             )
         print(f"reading {name}  ({cache})")
-        stats[name] = frame_statistics(cache)
+        stats[name] = frame_statistics(cache, args.layer)
 
     assert ids_ref is not None
     df = meta.loc[ids_ref].reset_index()
