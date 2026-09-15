@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -226,6 +227,53 @@ def evaluate(model, loader, device, amp):
     return np.concatenate(logits), np.concatenate(targets)
 
 
+def backbone_groups(encoder_module, encoder, base_lr: float,
+                    decay: float) -> list[dict]:
+    """One parameter group per depth, with the rate decayed toward the input.
+
+    A pretrained ViT holds general features in its early blocks and
+    task-specific ones in its late blocks. A single rate across the stack means
+    a rate high enough to adapt the last block also overwrites the first, which
+    is why unfreezing twelve blocks scored 0.5190 against 0.5650 for four.
+    Decaying by depth lets the whole encoder be unfrozen without discarding what
+    the early layers already encode.
+
+    Parameters outside the transformer blocks are placed by where they sit: the
+    embeddings receive the most decayed rate, and anything after the last block
+    -- the terminal norm the head reads -- receives the least.
+
+    With ``decay = 1.0`` every group receives ``base_lr``, reproducing the
+    single-group behaviour of the runs already scored.
+    """
+    blocks = transformer_blocks(encoder)
+    n = len(blocks)
+
+    depth_of: dict[int, int] = {}
+    for i, block in enumerate(blocks, start=1):
+        for q in block.parameters():
+            depth_of[id(q)] = i
+    for name, q in encoder_module.named_parameters():
+        if id(q) not in depth_of:
+            depth_of[id(q)] = 0 if "embed" in name else n + 1
+
+    by_depth: dict[int, list] = {}
+    for q in encoder_module.parameters():
+        if q.requires_grad:
+            by_depth.setdefault(depth_of.get(id(q), n + 1), []).append(q)
+
+    groups = []
+    for depth in sorted(by_depth):
+        # The top of the stack keeps base_lr; each step toward the input scales
+        # it by ``decay``. Anything past the last block is treated as the top.
+        steps = max(n - depth, 0)
+        groups.append({
+            "params": by_depth[depth],
+            "lr": base_lr * (decay ** steps),
+            "name": f"depth_{depth}",
+        })
+    return groups
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -259,6 +307,14 @@ def main() -> int:
                         "tokens. Implied by --from-scratch: a frozen random "
                         "embedding would leave the model training on a fixed "
                         "random projection of pixels.")
+    p.add_argument("--layer-decay", type=float, default=1.0,
+                   help="per-depth multiplier on the backbone rate, applied "
+                        "toward the input: 0.75 is the usual value for ViT "
+                        "fine-tuning. The default of 1.0 gives every depth the "
+                        "same rate, reproducing the runs already scored.")
+    p.add_argument("--warmup-epochs", type=int, default=0,
+                   help="linear warmup before the cosine decay. The default of "
+                        "0 reproduces the existing schedule.")
     p.add_argument("--weight-decay", type=float, default=0.05)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--epochs", type=int, default=10)
@@ -310,12 +366,23 @@ def main() -> int:
 
     # Two parameter groups. A single rate across a pretrained encoder and a fresh
     # head either leaves the head undertrained or destroys the encoder.
-    groups = [{"params": [p for p in model.head.parameters()], "lr": args.head_lr}]
-    backbone = [p for p in model.encoder.parameters() if p.requires_grad]
-    if backbone:
-        groups.append({"params": backbone, "lr": args.backbone_lr})
+    groups = [{"params": [p for p in model.head.parameters()], "lr": args.head_lr,
+               "name": "head"}]
+    groups += backbone_groups(model.encoder, encoder, args.backbone_lr,
+                              args.layer_decay)
     opt = torch.optim.AdamW(groups, weight_decay=args.weight_decay)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+
+    # Warmup then cosine. The first steps are taken with a randomly initialised
+    # head, whose gradients say nothing about the encoder, so the backbone
+    # should not move far while they dominate.
+    def lr_scale(epoch: int) -> float:
+        if epoch < args.warmup_epochs:
+            return (epoch + 1) / max(args.warmup_epochs, 1)
+        progress = ((epoch - args.warmup_epochs)
+                    / max(args.epochs - args.warmup_epochs, 1))
+        return 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_scale)
     scaler = torch.amp.GradScaler("cuda", enabled=amp)
     criterion = nn.BCEWithLogitsLoss()
 
@@ -325,6 +392,10 @@ def main() -> int:
           + ("  (frozen control)" if frozen_control else ""))
     print(f"parameters     {trainable:,} trainable, {frozen:,} frozen, "
           f"{sum(p.numel() for p in model.head.parameters()):,} in the head")
+    if args.layer_decay < 1.0:
+        rates = [g["lr"] for g in groups if g.get("name", "").startswith("depth")]
+        print(f"layer decay    {args.layer_decay}, backbone rates "
+              f"{min(rates):.1e} to {max(rates):.1e} across {len(rates)} depths")
     print(f"learning rate  head {args.head_lr:.0e}, backbone "
           f"{args.backbone_lr:.0e}" + ("  (no update)" if frozen_control else ""))
     print(f"schedule       {args.epochs} epochs, batch {args.batch_size}, "

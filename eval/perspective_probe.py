@@ -298,26 +298,54 @@ def main() -> int:
     # model, and it asks what Section 5.16 could not: whether ambiguity is
     # anticipable from the frame.
     print(f"\ndoes predicted disagreement match observed disagreement?")
-    print(f"{'criterion':<11}{'AUC':>9}{'contested':>12}")
+    print(f"{'criterion':<11}{'spread AUC':>12}{'product AUC':>13}"
+          f"{'contested':>12}")
     results["disagreement"] = {}
+    probs = 1.0 / (1.0 + np.exp(-logits))
     for c, name in enumerate(CRITERIA):
         contested = ((truth[:, :, c].sum(axis=1) == 1) |
                      (truth[:, :, c].sum(axis=1) == 2)).astype(int)
-        # Spread among the three predicted logits: large where the heads split.
+
+        # The original rule: spread among the three predicted logits. Under a
+        # threshold account the three heads share a direction and differ by a
+        # bias, so this is the spread of three near-constants and returns chance
+        # by construction. Kept for comparison, not as a measurement.
         spread = logits[:, :, c].std(axis=1)
-        auc = (roc_auc_score(contested, spread)
-               if np.unique(contested).size > 1 else float("nan"))
-        results["disagreement"][name] = {"auc": auc,
-                                         "contested_rate": float(contested.mean())}
-        print(f"{name.upper():<11}{auc:>9.4f}{contested.mean():>12.3f}")
-    print("  An AUC near 0.5 means disagreement is not anticipable from the")
-    print("  frame, which would be consistent with the null in Section 5.19.")
+
+        # The rule the account calls for: the probability that the three raters
+        # are neither unanimously positive nor unanimously negative. This peaks
+        # where the shared score sits between the strictest and most lenient
+        # bar, and is unaffected by the biases differing.
+        p = probs[:, :, c]
+        product = 1.0 - p.prod(axis=1) - (1.0 - p).prod(axis=1)
+
+        usable = np.unique(contested).size > 1
+        auc_spread = roc_auc_score(contested, spread) if usable else float("nan")
+        auc_product = roc_auc_score(contested, product) if usable else float("nan")
+        results["disagreement"][name] = {
+            "auc_spread": auc_spread,
+            "auc_product": auc_product,
+            "contested_rate": float(contested.mean()),
+        }
+        print(f"{name.upper():<11}{auc_spread:>12.4f}{auc_product:>13.4f}"
+              f"{contested.mean():>12.3f}")
+    print("\n  The spread column is uninformative by construction: three linear")
+    print("  heads sharing a direction differ by a bias, and the spread of three")
+    print("  constants is near-constant. Read the product column.")
+    print("\n  An AUC near 0.5 there means disagreement is not anticipable from")
+    print("  the frame under a rule designed to find the band, which is a")
+    print("  stronger null than the spread rule could support.")
     print("  Well above 0.5 would mean the model can flag frames on which")
     print("  annotators are likely to split, which is a clinically useful")
     print("  output the consensus formulation cannot produce.")
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # The per-rater predictions are saved because two further analyses need them
+    # and refitting the grid to recover them is wasteful: the band score above
+    # can be recomputed under other rules, and the same predictions over a
+    # temporal window test whether context closes the band.
+    np.savez(out / "per_rater_logits.npz", logits=logits, targets=truth)
     with open(out / "perspective_probe.json", "w", encoding="utf-8") as fh:
         json.dump(results, fh, indent=2)
     print(f"\nwritten to {out / 'perspective_probe.json'}")

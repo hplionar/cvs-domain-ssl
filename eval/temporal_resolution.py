@@ -77,15 +77,20 @@ def load_windows(root: Path, arm: str, prefix: str) -> dict[int, np.ndarray]:
         files = sorted(window_dir.glob(f"{prefix}_seed*.npz"))
         if not files:
             continue
-        out[k] = np.mean(
-            [1.0 / (1.0 + np.exp(-np.load(f)["logits"])) for f in files], axis=0
+        # Seeds are kept separate rather than averaged, so the bootstrap can
+        # draw one per replicate. Averaging first treats head initialisation as
+        # exact, and it is not: the same protocol moved by 0.012 between two
+        # runs, against a video half-width of 0.015.
+        out[k] = np.stack(
+            [1.0 / (1.0 + np.exp(-np.load(f)["logits"])) for f in files]
         )
     return out
 
 
 def paired_bootstrap(a: np.ndarray, b: np.ndarray, y: np.ndarray,
                      video_of: np.ndarray, n_boot: int,
-                     rng: np.random.Generator) -> dict[str, float]:
+                     rng: np.random.Generator,
+                     seeds_inside: bool = True) -> dict[str, float]:
     """Interval on mAP(a) - mAP(b), resampled over videos.
 
     Both arms are scored on the same resampled videos in every replicate, so
@@ -96,15 +101,41 @@ def paired_bootstrap(a: np.ndarray, b: np.ndarray, y: np.ndarray,
     videos = np.unique(video_of)
     rows = {v: np.flatnonzero(video_of == v) for v in videos}
     draws = np.empty(n_boot)
+    unpaired_a = np.empty(n_boot)
     for i in range(n_boot):
         idx = np.concatenate([rows[v] for v in
                               rng.choice(videos, videos.size, replace=True)])
-        draws[i] = mean_ap(y[idx], a[idx]) - mean_ap(y[idx], b[idx])
+        if a.ndim == 3 and seeds_inside:
+            # One seed per arm per replicate, drawn independently: the seeds are
+            # not paired in any meaningful sense, and pairing them would
+            # understate the variance a reader should expect from a rerun.
+            sa = a[rng.integers(a.shape[0])]
+            sb = b[rng.integers(b.shape[0])]
+        else:
+            sa = a.mean(axis=0) if a.ndim == 3 else a
+            sb = b.mean(axis=0) if b.ndim == 3 else b
+        ap_a, ap_b = mean_ap(y[idx], sa[idx]), mean_ap(y[idx], sb[idx])
+        draws[i] = ap_a - ap_b
+        unpaired_a[i] = ap_a
     lo, hi = np.percentile(draws, 2.5), np.percentile(draws, 97.5)
+    flat_a = a.mean(axis=0) if a.ndim == 3 else a
+    flat_b = b.mean(axis=0) if b.ndim == 3 else b
+    # The unpaired half-width is what these data would give if the two arms were
+    # measured independently. Its ratio to the paired one says how much
+    # per-video error the arms share: sqrt(2) times means none, and well below
+    # that means most of the difficulty belongs to the videos and the labels
+    # rather than to either model.
+    single = float((np.percentile(unpaired_a, 97.5)
+                    - np.percentile(unpaired_a, 2.5)) / 2)
+    unpaired = float(np.sqrt(2) * single)
+    paired_hw = float((hi - lo) / 2)
     return {
-        "point": mean_ap(y, a) - mean_ap(y, b),
+        "point": mean_ap(y, flat_a) - mean_ap(y, flat_b),
         "ci_low": float(lo), "ci_high": float(hi),
-        "half_width": float((hi - lo) / 2),
+        "half_width": paired_hw,
+        "unpaired_half_width": unpaired,
+        "shared_fraction": float(1 - (paired_hw / unpaired) ** 2)
+                           if unpaired > 0 else float("nan"),
         "excludes_zero": bool(lo > 0 or hi < 0),
     }
 
@@ -121,6 +152,11 @@ def main() -> int:
     p.add_argument("--logits-prefix", default="test_logits_official")
     p.add_argument("--reference", type=int, default=1,
                    help="the window every other is compared against")
+    p.add_argument("--seeds-outside", action="store_true",
+                   help="average the probe seeds before resampling, as the "
+                        "first version did. Kept only to reproduce the earlier "
+                        "figures; the default propagates seed variance, which "
+                        "at this scale is comparable to video variance.")
     p.add_argument("--n-boot", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output-dir", required=True)
@@ -146,21 +182,30 @@ def main() -> int:
 
         print(f"{arm}")
         print(f"  {'k':>4}{'mAP':>9}{'vs k=%d' % args.reference:>11}"
-              f"{'95% interval':>22}{'half-width':>12}{'resolved':>10}")
+              f"{'95% interval':>22}{'paired':>10}{'unpaired':>11}"
+              f"{'shared':>9}{'res.':>7}")
         entry: dict[str, Any] = {}
         ref = windows[args.reference]
         for k in sorted(windows):
-            ap = mean_ap(targets, windows[k])
+            # Averaged over seeds for the point estimate, which is the
+            # figure that goes in a table. The interval below draws a seed per
+            # replicate instead, so the two are answering different questions:
+            # what the arm scores, and what a rerun would give.
+            ap = mean_ap(targets, windows[k].mean(axis=0)
+                         if windows[k].ndim == 3 else windows[k])
             if k == args.reference:
                 print(f"  {k:>4}{ap:>9.4f}{'—':>11}{'':>22}{'':>12}{'':>10}")
                 entry[str(k)] = {"map": ap}
                 continue
             r = paired_bootstrap(windows[k], ref, targets, video_of,
-                                 args.n_boot, rng)
+                                 args.n_boot, rng,
+                                 seeds_inside=not args.seeds_outside)
             entry[str(k)] = {"map": ap, **r}
             print(f"  {k:>4}{ap:>9.4f}{r['point']:>+11.4f}"
                   f"  [{r['ci_low']:+.4f}, {r['ci_high']:+.4f}]"
-                  f"{r['half_width']:>12.4f}{'yes' if r['excludes_zero'] else 'no':>10}")
+                  f"{r['half_width']:>10.4f}{r['unpaired_half_width']:>11.4f}"
+                  f"{100*r['shared_fraction']:>8.0f}%"
+                  f"{'yes' if r['excludes_zero'] else 'no':>7}")
         results["arms"][arm] = entry
         hw = [v["half_width"] for v in entry.values() if "half_width" in v]
         if hw:

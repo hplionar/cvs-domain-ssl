@@ -73,9 +73,16 @@ def read_index(cache_dir: Path) -> list[str]:
 def load_scores(probe_dir: Path, n_rows: int) -> np.ndarray:
     """Mean probability over seeds, [N, 3].
 
-    Averaging over seeds first is deliberate: the bootstrap is about sampling
-    variability of the videos, and carrying seed variance into it would conflate
-    two sources that we want reported separately.
+    Seeds are kept rather than averaged. An interval is meant to say what a
+    rerun would give, and a rerun draws new head initialisations as well as
+    facing a different sample, so excluding seed variance makes the interval
+    narrower than the thing it describes. Measured on the temporal probe: the
+    half-width rose from 0.015 to 0.022 when seeds were resampled alongside
+    videos, and five comparisons that excluded zero stopped doing so.
+
+    The earlier version averaged first, reasoning that the bootstrap was about
+    video sampling and seed variance belonged elsewhere. That is right about
+    what the two sources are and wrong about what the interval is for.
     """
     files = sorted(probe_dir.glob("val_logits_seed*.npz"))
     if not files:
@@ -86,7 +93,7 @@ def load_scores(probe_dir: Path, n_rows: int) -> np.ndarray:
         if logits.shape[0] != n_rows:
             raise ValueError(f"{path.name}: {logits.shape[0]} rows, cache has {n_rows}.")
         stack.append(sigmoid(logits))
-    return np.mean(stack, axis=0)
+    return np.stack(stack)
 
 
 def safe_auc(y: np.ndarray, s: np.ndarray) -> float:
@@ -181,6 +188,10 @@ def main() -> int:
     df = meta.loc[reference_ids].reset_index()
     videos = df["video_id"].to_numpy()
     boot = Bootstrap(videos, args.n_boot, args.seed)
+    # Separate stream from the video resampler, so the seed draws do not
+    # consume the same entropy and the replicate indices stay comparable
+    # with a run made before seeds were resampled.
+    seed_rng = np.random.default_rng(args.seed + 1)
     print(f"{len(df)} frames, {boot.n_videos} videos, {args.n_boot} replicates, "
           f"{len(arms)} arms\n")
 
@@ -198,7 +209,11 @@ def main() -> int:
     print("Delta = unanimous AUC - contested AUC, mean over criteria")
     print(f"{'arm':<20}{'unan':>9}{'cont':>9}{'delta':>9}{'95% CI':>22}")
     for name, arm in arms.items():
-        probs = arm["probs"]
+        # Seeds averaged here. These are each arm's own marginals, where the
+        # question is what the arm scores rather than what a rerun of a
+        # comparison would give; the seed draw is kept for the pairwise block
+        # below, which is where the resolvable-difference claim is made.
+        probs = arm["probs"].mean(axis=0) if arm["probs"].ndim == 3 else arm["probs"]
 
         def delta(rows: np.ndarray, probs=probs) -> float:
             vals = []
@@ -228,7 +243,9 @@ def main() -> int:
             def stat(rows: np.ndarray) -> float:
                 means = []
                 for arm in arms.values():
-                    vals = [stratum_auc(labels[c], arm["probs"][:, j], mask_for(c), rows)
+                    pr = (arm["probs"].mean(axis=0)
+                          if arm["probs"].ndim == 3 else arm["probs"])
+                    vals = [stratum_auc(labels[c], pr[:, j], mask_for(c), rows)
                             for j, c in enumerate(CRITERIA)]
                     if all(np.isfinite(v) for v in vals):
                         means.append(float(np.mean(vals)))
@@ -261,16 +278,28 @@ def main() -> int:
             for stratum in ("unanimous", "contested"):
                 mask_for = (lambda c: unanimous[c]) if stratum == "unanimous" else (lambda c: ~unanimous[c])
 
-                def diff(rows: np.ndarray, pa=pa, pb=pb, mask_for=mask_for) -> float:
+                def diff(rows: np.ndarray, pa=pa, pb=pb, mask_for=mask_for,
+                         draw_seed=True) -> float:
+                    # One seed per arm per replicate, drawn independently: two
+                    # arms' seeds are not paired in any meaningful sense, and
+                    # pairing them would understate what a rerun gives.
+                    if draw_seed:
+                        sa = pa[seed_rng.integers(pa.shape[0])]
+                        sb = pb[seed_rng.integers(pb.shape[0])]
+                    else:
+                        sa, sb = pa.mean(axis=0), pb.mean(axis=0)
                     vals = []
                     for j, c in enumerate(CRITERIA):
-                        x = stratum_auc(labels[c], pa[:, j], mask_for(c), rows)
-                        y = stratum_auc(labels[c], pb[:, j], mask_for(c), rows)
+                        x = stratum_auc(labels[c], sa[:, j], mask_for(c), rows)
+                        y = stratum_auc(labels[c], sb[:, j], mask_for(c), rows)
                         if np.isfinite(x) and np.isfinite(y):
                             vals.append(x - y)
                     return float(np.mean(vals)) if vals else float("nan")
 
-                point = diff(all_rows)
+                # The point estimate averages seeds; the interval resamples
+                # them. Different questions: what the arms score, and what a
+                # rerun would give.
+                point = diff(all_rows, draw_seed=False)
                 ci = boot.interval(diff)
                 sig = "*" if np.isfinite(ci["ci_low"]) and ci["ci_low"] * ci["ci_high"] > 0 else ""
                 results["pairwise"].setdefault(f"{a}-{b}", {})[stratum] = {"diff": point, **ci}
@@ -285,7 +314,8 @@ def main() -> int:
         print(f"{'arm':<20}{'crit':<5}{'unan':>9}{'cont':>9}{'delta':>9}{'95% CI':>22}")
         results["per_criterion"] = {}
         for name, arm in arms.items():
-            probs = arm["probs"]
+            probs = (arm["probs"].mean(axis=0)
+                     if arm["probs"].ndim == 3 else arm["probs"])
             results["per_criterion"][name] = {}
             for j, c in enumerate(CRITERIA):
                 def delta_c(rows: np.ndarray, probs=probs, j=j, c=c) -> float:
