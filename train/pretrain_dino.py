@@ -48,7 +48,11 @@ global crops is pulled toward that of a frozen copy of the *initial* backbone
 zero at step 0 and grows with drift, so it is a leash whose tension the weight
 sets. Too loose reproduces the unanchored arm; too tight reproduces the base
 encoder; a run is informative only if the DINO loss still falls while the Gram
-term is non-zero, and both are logged for that reason.
+term is non-zero, and both are logged for that reason. The term is computed
+from a second, eval-mode pass of the student: the HF DINOv3 forward rescales
+its RoPE coordinates at random in training mode, which every DINOv3 arm in this
+project trains with, and which would otherwise put a floor of about 0.03 under
+the term regardless of drift.
 """
 
 from __future__ import annotations
@@ -142,26 +146,17 @@ class DINOModel(nn.Module):
         self.backbone = backbone
         self.head = head
 
-    def forward(
-        self, views: list[torch.Tensor], *, return_patches: bool = False
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, views: list[torch.Tensor]) -> torch.Tensor:
         """Run a list of views, concatenating outputs in the given order.
 
         Views of differing resolution cannot be batched into one tensor, so they
         are grouped by size. Order is preserved so the loss can identify which
         rows correspond to which view index.
-
-        With ``return_patches`` the patch tokens of the largest-resolution group
-        (the global views) are also returned, shape ``[n_global * B, P, D]`` in
-        view order, for the Gram anchor. They come out of the same forward pass
-        as the pooled output, so requesting them costs no extra compute.
         """
         sizes = [v.shape[-1] for v in views]
         order = sorted(range(len(views)), key=lambda i: sizes[i])
-        global_size = max(sizes)
 
         outputs: list[torch.Tensor | None] = [None] * len(views)
-        patches: torch.Tensor | None = None
         i = 0
         while i < len(order):
             size = sizes[order[i]]
@@ -176,29 +171,12 @@ class DINOModel(nn.Module):
             # CLS where the architecture has one, else mean-pooled patches.
             pooled = hidden[:, 0] if hidden.shape[1] > 1 else hidden.mean(dim=1)
             projected = self.head(pooled)
-            if return_patches and size == global_size:
-                # The last n_patch tokens are the patch grid whatever prefix
-                # (CLS, registers) the architecture puts before it. Checked
-                # against the grid size rather than assumed.
-                patch = int(self.backbone.config.patch_size)
-                n_patch = (size // patch) ** 2
-                if hidden.shape[1] <= n_patch:
-                    raise RuntimeError(
-                        f"{hidden.shape[1]} tokens for a {size}px input at patch "
-                        f"{patch}: expected {n_patch} patches plus a CLS token."
-                    )
-                patches = hidden[:, -n_patch:]
 
             per_view = projected.shape[0] // len(group)
             for k, j in enumerate(group):
                 outputs[j] = projected[k * per_view : (k + 1) * per_view]
 
-        out = torch.cat(outputs, dim=0)  # type: ignore[arg-type]
-        if return_patches:
-            if patches is None:
-                raise RuntimeError("return_patches: no global-resolution group was run")
-            return out, patches
-        return out
+        return torch.cat(outputs, dim=0)  # type: ignore[arg-type]
 
 
 def gram_loss(student_patches: torch.Tensor, anchor_patches: torch.Tensor) -> torch.Tensor:
@@ -701,19 +679,31 @@ def main() -> int:
             with torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
                 with torch.no_grad():
                     teacher_out = teacher(views[:2])   # global views only
-                if anchor is not None:
-                    student_out, student_patches = student(views, return_patches=True)
-                else:
-                    student_out = student(views)       # all views
+                student_out = student(views)           # all views
                 loss = criterion(student_out, teacher_out,
                                  num_views=len(views), teacher_temp=teacher_temp)
                 dino_loss = loss.detach()
                 gram = None
                 if anchor is not None and state.step >= gram_start:
+                    # A second, eval-mode pass of the student over the global
+                    # crops. DINOv3's forward rescales its RoPE coordinates at
+                    # random in training mode (pos_embed_rescale), so the
+                    # train-mode tokens above and the eval-mode anchor differ by
+                    # that draw alone -- 0.03 measured with lr 0. Geometry is
+                    # compared deterministic against deterministic; the DINO
+                    # loss keeps its train-mode pass, augmentation included, so
+                    # the recipe matches the unanchored arm. The last n_patch
+                    # tokens are the patch grid whatever prefix (CLS, registers)
+                    # precedes it.
+                    globals_ = torch.cat(views[:2], dim=0)
+                    n_patch = (globals_.shape[-1] // int(student.backbone.config.patch_size)) ** 2
+                    student.backbone.eval()
+                    student_patches = student.backbone(
+                        pixel_values=globals_).last_hidden_state[:, -n_patch:]
+                    student.backbone.train()
                     with torch.no_grad():
                         anchor_patches = anchor(
-                            pixel_values=torch.cat(views[:2], dim=0)
-                        ).last_hidden_state[:, -student_patches.shape[1]:]
+                            pixel_values=globals_).last_hidden_state[:, -n_patch:]
                     gram = gram_loss(student_patches, anchor_patches)
                     loss = loss + gram_weight * gram
 

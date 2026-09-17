@@ -6,7 +6,7 @@ seed: 0
 output_dir: /group/pmc085/hlionar/outputs/cvs-domain-ssl/ssl/dinov3_b_sages_trainonly_gram
 model:
   checkpoint: facebook/dinov3-vitb16-pretrain-lvd1689m
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   head:
     out_dim: 65536
     hidden_dim: 2048
