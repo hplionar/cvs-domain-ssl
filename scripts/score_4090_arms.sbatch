@@ -14,7 +14,7 @@
 #   finetune_decay winner on validation (0.6416): dinov3_b_lr3e-4_g0.75
 #   hardware control: mae_b_sages_trainonly rerun on the 4090, then fine-tuned
 #   Cholec80 corpus arm: mae_b adapted on Cholec80 video01-48, then fine-tuned
-# Comparators, official test: mae_b_sages_trainonly_ft 0.546 (+0.037 over
+# Comparators, official test: mae_b_sages_trainonly_ft 0.5464 (+0.037 over
 # mae_b), dinov3_b four blocks 0.5650.
 
 set -uo pipefail

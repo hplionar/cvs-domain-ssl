@@ -70,7 +70,8 @@ def read_index(cache_dir: Path) -> list[str]:
     return [r["sample_id"] for r in rows]
 
 
-def load_scores(probe_dir: Path, n_rows: int) -> np.ndarray:
+def load_scores(probe_dir: Path, n_rows: int,
+                prefix: str = "val_logits") -> np.ndarray:
     """Mean probability over seeds, [N, 3].
 
     Seeds are kept rather than averaged. An interval is meant to say what a
@@ -84,9 +85,9 @@ def load_scores(probe_dir: Path, n_rows: int) -> np.ndarray:
     video sampling and seed variance belonged elsewhere. That is right about
     what the two sources are and wrong about what the interval is for.
     """
-    files = sorted(probe_dir.glob("val_logits_seed*.npz"))
+    files = sorted(probe_dir.glob(f"{prefix}_seed*.npz"))
     if not files:
-        raise FileNotFoundError(f"No val_logits_seed*.npz in {probe_dir}")
+        raise FileNotFoundError(f"No {prefix}_seed*.npz in {probe_dir}")
     stack = []
     for path in files:
         logits = np.load(path)["logits"]
@@ -155,6 +156,11 @@ def main() -> int:
     p.add_argument("--arm", action="append", required=True,
                    help="name=probe_dir:cache_dir (repeatable)")
     p.add_argument("--split", default="val")
+    p.add_argument("--logits-prefix", default=None,
+                   help="filename stem of the per-seed logits. Defaults to "
+                        "val_logits for the validation split and "
+                        "test_logits_official for the official test split, "
+                        "matching what the probe writes for each.")
     p.add_argument("--n-boot", type=int, default=2000)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output-dir", required=True)
@@ -182,7 +188,9 @@ def main() -> int:
                 f"{name} was scored on a different sample order from the first arm. "
                 f"Paired differences require identical frames in identical order."
             )
-        arms[name] = {"probs": load_scores(Path(probe_dir), len(ids))}
+        prefix = args.logits_prefix or (
+            "test_logits_official" if args.split == "test" else "val_logits")
+        arms[name] = {"probs": load_scores(Path(probe_dir), len(ids), prefix)}
 
     assert reference_ids is not None
     df = meta.loc[reference_ids].reset_index()
