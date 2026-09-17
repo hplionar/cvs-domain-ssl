@@ -37,6 +37,18 @@ Augmentation
 perturbation degrades the tissue-colour cue CVS criterion C2 depends on, and C2
 is the strongest criterion in all eight SAGES arms measured so far. Set
 `data.colour_jitter: true` to restore the reference recipe as its own arm.
+
+Gram anchoring
+--------------
+The loss above reads the CLS token only; the 196 patch tokens receive no
+gradient of their own and move only through shared weights. `train.gram_weight`
+adds DINOv3's Gram term: the Gram matrix of l2-normalised patch tokens on the
+global crops is pulled toward that of a frozen copy of the *initial* backbone
+(the anchor -- not the EMA teacher, which drifts with the student). The term is
+zero at step 0 and grows with drift, so it is a leash whose tension the weight
+sets. Too loose reproduces the unanchored arm; too tight reproduces the base
+encoder; a run is informative only if the DINO loss still falls while the Gram
+term is non-zero, and both are logged for that reason.
 """
 
 from __future__ import annotations
@@ -130,17 +142,26 @@ class DINOModel(nn.Module):
         self.backbone = backbone
         self.head = head
 
-    def forward(self, views: list[torch.Tensor]) -> torch.Tensor:
+    def forward(
+        self, views: list[torch.Tensor], *, return_patches: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run a list of views, concatenating outputs in the given order.
 
         Views of differing resolution cannot be batched into one tensor, so they
         are grouped by size. Order is preserved so the loss can identify which
         rows correspond to which view index.
+
+        With ``return_patches`` the patch tokens of the largest-resolution group
+        (the global views) are also returned, shape ``[n_global * B, P, D]`` in
+        view order, for the Gram anchor. They come out of the same forward pass
+        as the pooled output, so requesting them costs no extra compute.
         """
         sizes = [v.shape[-1] for v in views]
         order = sorted(range(len(views)), key=lambda i: sizes[i])
+        global_size = max(sizes)
 
         outputs: list[torch.Tensor | None] = [None] * len(views)
+        patches: torch.Tensor | None = None
         i = 0
         while i < len(order):
             size = sizes[order[i]]
@@ -155,12 +176,49 @@ class DINOModel(nn.Module):
             # CLS where the architecture has one, else mean-pooled patches.
             pooled = hidden[:, 0] if hidden.shape[1] > 1 else hidden.mean(dim=1)
             projected = self.head(pooled)
+            if return_patches and size == global_size:
+                # The last n_patch tokens are the patch grid whatever prefix
+                # (CLS, registers) the architecture puts before it. Checked
+                # against the grid size rather than assumed.
+                patch = int(self.backbone.config.patch_size)
+                n_patch = (size // patch) ** 2
+                if hidden.shape[1] <= n_patch:
+                    raise RuntimeError(
+                        f"{hidden.shape[1]} tokens for a {size}px input at patch "
+                        f"{patch}: expected {n_patch} patches plus a CLS token."
+                    )
+                patches = hidden[:, -n_patch:]
 
             per_view = projected.shape[0] // len(group)
             for k, j in enumerate(group):
                 outputs[j] = projected[k * per_view : (k + 1) * per_view]
 
-        return torch.cat(outputs, dim=0)  # type: ignore[arg-type]
+        out = torch.cat(outputs, dim=0)  # type: ignore[arg-type]
+        if return_patches:
+            if patches is None:
+                raise RuntimeError("return_patches: no global-resolution group was run")
+            return out, patches
+        return out
+
+
+def gram_loss(student_patches: torch.Tensor, anchor_patches: torch.Tensor) -> torch.Tensor:
+    """Squared Frobenius distance between student and anchor patch Gram matrices.
+
+    Tokens are l2-normalised, so each Gram entry is the cosine between two
+    patches of the same image and the matrix is the image's internal geometry,
+    invariant to any global rotation of feature space. The P x P difference is
+    summed and divided by P -- a per-token rather than per-pair scale -- then
+    averaged over the batch. DINOv3 uses the raw Frobenius sum with weight 1,
+    which on 196 tokens equals this quantity at weight 196.
+
+    Float32 regardless of autocast: the squared differences are small and fp16
+    would floor them.
+    """
+    s = F.normalize(student_patches.float(), dim=-1)
+    a = F.normalize(anchor_patches.float(), dim=-1)
+    gram_s = torch.bmm(s, s.transpose(1, 2))
+    gram_a = torch.bmm(a, a.transpose(1, 2))
+    return (gram_s - gram_a).pow(2).sum(dim=(1, 2)).div(s.shape[1]).mean()
 
 
 class DINOLoss(nn.Module):
@@ -410,6 +468,17 @@ def build_models(config: dict[str, Any], device: torch.device):
     for param in teacher.parameters():
         param.requires_grad = False
 
+    # Gram anchor: the pretrained backbone, frozen, never updated. Built here,
+    # before any checkpoint resume, so it is the pristine weights on every
+    # run; it is deterministic from the checkpoint name and is not saved.
+    anchor = None
+    if float(config.get("train", {}).get("gram_weight", 0.0)) > 0:
+        anchor = copy.deepcopy(student.backbone)
+        for param in anchor.parameters():
+            param.requires_grad = False
+        anchor.eval()
+        anchor = anchor.to(device)
+
     freeze_last = int(config["model"].get("freeze_last_blocks", 0))
     if freeze_last:
         blocks = _transformer_blocks(student.backbone)
@@ -442,7 +511,7 @@ def build_models(config: dict[str, Any], device: torch.device):
     if config["model"].get("gradient_checkpointing", False):
         student.backbone.gradient_checkpointing_enable()
 
-    return student.to(device), teacher.to(device), dim, out_dim
+    return student.to(device), teacher.to(device), anchor, dim, out_dim
 
 
 def build_dataset(config: dict[str, Any]) -> tuple[SSLFrameDataset, MultiCropTransform]:
@@ -513,7 +582,7 @@ def main() -> int:
     if device.type != "cuda":
         print("WARNING: no CUDA device; this will be extremely slow.", flush=True)
 
-    student, teacher, dim, out_dim = build_models(config, device)
+    student, teacher, anchor, dim, out_dim = build_models(config, device)
     dataset, transform = build_dataset(config)
 
     train_cfg = config["train"]
@@ -533,6 +602,8 @@ def main() -> int:
     total_steps = int(train_cfg.get("max_steps", steps_per_epoch * epochs))
     warmup = int(train_cfg.get("warmup_steps", max(1, total_steps // 20)))
     base_lr = float(train_cfg["lr"])
+    gram_weight = float(train_cfg.get("gram_weight", 0.0))
+    gram_start = int(train_cfg.get("gram_start_step", 0))
 
     criterion = DINOLoss(
         out_dim,
@@ -575,6 +646,9 @@ def main() -> int:
           f"{train_cfg.get('teacher_temp_end', 0.07)} over {teacher_temp_warmup} steps")
     print(f"ema momentum  {train_cfg.get('ema_start', 0.996)} -> {train_cfg.get('ema_end', 1.0)}")
     print(f"centre mom.   {train_cfg.get('centre_momentum', 0.9)}")
+    if anchor is not None:
+        print(f"gram anchor   weight {gram_weight} from step {gram_start}, "
+              f"frozen copy of the checkpoint")
     print(f"device        {device}  amp={'fp16' if device.type == 'cuda' else 'off'}")
     print(f"output        {output_dir}")
     print(f"start         step {state.step}")
@@ -597,7 +671,7 @@ def main() -> int:
 
     while state.step < total_steps and not requeue.should_stop:
         state.epoch += 1
-        running, seen = 0.0, 0
+        running, running_dino, running_gram, seen = 0.0, 0.0, 0.0, 0
 
         for views in loader:
             if state.step >= total_steps or requeue.should_stop:
@@ -627,9 +701,21 @@ def main() -> int:
             with torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
                 with torch.no_grad():
                     teacher_out = teacher(views[:2])   # global views only
-                student_out = student(views)           # all views
+                if anchor is not None:
+                    student_out, student_patches = student(views, return_patches=True)
+                else:
+                    student_out = student(views)       # all views
                 loss = criterion(student_out, teacher_out,
                                  num_views=len(views), teacher_temp=teacher_temp)
+                dino_loss = loss.detach()
+                gram = None
+                if anchor is not None and state.step >= gram_start:
+                    with torch.no_grad():
+                        anchor_patches = anchor(
+                            pixel_values=torch.cat(views[:2], dim=0)
+                        ).last_hidden_state[:, -student_patches.shape[1]:]
+                    gram = gram_loss(student_patches, anchor_patches)
+                    loss = loss + gram_weight * gram
 
             if not torch.isfinite(loss):
                 raise RuntimeError(
@@ -659,6 +745,9 @@ def main() -> int:
 
             state.step += 1
             running += loss.item()
+            running_dino += dino_loss.item()
+            if gram is not None:
+                running_gram += gram.item()
             seen += 1
 
             if state.step % log_every == 0:
@@ -668,17 +757,22 @@ def main() -> int:
                 row = {
                     "step": state.step, "epoch": state.epoch,
                     "loss": round(mean_loss, 5), "lr": lr, "wd": round(wd, 5),
+                    "dino": round(running_dino / max(seen, 1), 5),
+                    "gram": round(running_gram / max(seen, 1), 5),
                     "teacher_temp": round(teacher_temp, 5),
                     "ema": round(momentum, 6),
                 }
+                gram_text = (f"gram {running_gram / max(seen, 1):.4f}  "
+                             if anchor is not None else "")
                 print(
                     f"step {state.step:7d}/{total_steps}  loss {mean_loss:.4f}  "
+                    + gram_text +
                     f"lr {lr:.2e}  t_temp {teacher_temp:.4f}  ema {momentum:.5f}  "
                     f"{rate:.2f} it/s  eta {(total_steps-state.step)/max(rate,1e-6)/3600:.1f}h",
                     flush=True,
                 )
                 state.history.append(row)
-                running, seen = 0.0, 0
+                running, running_dino, running_gram, seen = 0.0, 0.0, 0.0, 0
 
             if collapse_every and state.step % collapse_every == 0:
                 stats = teacher_statistics(teacher, views)
