@@ -135,6 +135,8 @@ def main() -> int:
     kwargs = {"freeze": False}
     if trained.get("checkpoint"):
         kwargs["adapted_checkpoint"] = trained["checkpoint"]
+    if trained.get("image_size"):
+        kwargs["image_size"] = trained["image_size"]
     encoder = build_encoder(trained["encoder"], **kwargs)
 
     # The head's shape does not depend on how much of the encoder was unfrozen,

@@ -63,8 +63,10 @@ class DINOv3Encoder(BaseEncoder):
         random_init: bool = False,
         adapted_checkpoint: str | Path | None = None,
         freeze: bool = True,
+        image_size: int | None = None,
     ) -> None:
         super().__init__(freeze=freeze)
+        self._image_size_override = int(image_size) if image_size else None
 
         # Continued pretraining is performed by the same trainer that adapts
         # DINOv2, and exports the same payload -- the teacher backbone under
@@ -116,7 +118,7 @@ class DINOv3Encoder(BaseEncoder):
         self._model_name = model_name or "from-config"
 
         cfg = model.config
-        image_size = int(cfg_get(cfg, "image_size"))
+        image_size = self._image_size_override or int(cfg_get(cfg, "image_size"))
         patch_size = int(cfg_get(cfg, "patch_size"))
         h, w = spatial_grid(image_size, patch_size)
 

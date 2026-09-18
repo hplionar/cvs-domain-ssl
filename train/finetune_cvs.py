@@ -321,6 +321,10 @@ def main() -> int:
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--num-workers", type=int, default=12)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--image-size", type=int, default=None,
+                   help="input resolution in pixels; default is the encoder "
+                        "checkpoint's own (224). Saved with the run so scoring "
+                        "uses the same size.")
     p.add_argument("--no-amp", action="store_true")
     p.add_argument("--device", default="cuda")
     args = p.parse_args()
@@ -332,6 +336,8 @@ def main() -> int:
     kwargs = {"freeze": False}
     if args.checkpoint:
         kwargs["adapted_checkpoint"] = args.checkpoint
+    if args.image_size:
+        kwargs["image_size"] = args.image_size
     encoder = build_encoder(args.encoder, **kwargs)
 
     if args.from_scratch:
