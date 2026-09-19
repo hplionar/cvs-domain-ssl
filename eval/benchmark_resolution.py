@@ -266,8 +266,8 @@ def main() -> int:
     print(f"{len(scores)} arms, {len(sample_ids)} frames, "
           f"{np.unique(video_of).size} videos\n")
     print("arm mAP on the full split:")
-    for arm in sorted(scores, key=lambda a: -mean_ap(targets, scores[a])):
-        print(f"  {arm:<26}{mean_ap(targets, scores[arm]):.4f}")
+    for arm in sorted(scores, key=lambda a: -mean_ap(targets, scores[a].mean(axis=0))):
+        print(f"  {arm:<26}{mean_ap(targets, scores[arm].mean(axis=0)):.4f}  ({scores[arm].shape[0]} seeds)")
 
     rng = np.random.default_rng(args.seed)
     results: dict[str, Any] = {"sizes": {}}
