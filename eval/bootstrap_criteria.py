@@ -17,17 +17,48 @@ Usage:
 import argparse
 import numpy as np
 import pandas as pd
-from sklearn.metrics import balanced_accuracy_score as bacc
+from sklearn.metrics import balanced_accuracy_score as bacc, average_precision_score
 
 p = argparse.ArgumentParser()
 p.add_argument("--manifest", required=True)
 p.add_argument("--logits", nargs="+", required=True)
 p.add_argument("--n-boot", type=int, default=2000)
+p.add_argument("--threshold-rule", choices=["max-bacc", "prevalence"], default="max-bacc",
+               help="how the validation threshold is chosen per seed and criterion: "
+                    "the cut maximising validation balanced accuracy, or the cut at "
+                    "which the model's validation positive rate equals validation prevalence")
+p.add_argument("--val-logits", nargs="+", default=None,
+               help="one logits_val.npz per --logits file, same order; the threshold "
+                    "per seed and criterion is the one that maximises validation "
+                    "balanced accuracy. Omitted: fixed 0.5.")
 p.add_argument("--seed", type=int, default=0)
 a = p.parse_args()
 
 meta = pd.read_csv(a.manifest)
 probs = np.stack([1 / (1 + np.exp(-np.load(f)["logits"])) for f in a.logits])  # [S, N, 3]
+
+def val_threshold(path):
+    d = np.load(path); pv = 1 / (1 + np.exp(-d["logits"])); yv = d["targets"].astype(int)
+    out = []
+    for c in range(3):
+        if a.threshold_rule == "prevalence":
+            q = 1.0 - yv[:, c].mean()
+            out.append(float(np.quantile(pv[:, c], q)))
+        else:
+            cands = np.unique(np.round(pv[:, c], 3))
+            scores_c = [(bacc(yv[:, c], pv[:, c] > t), t) for t in cands]
+            out.append(max(scores_c)[1])
+    return np.array(out)
+
+if a.val_logits:
+    assert len(a.val_logits) == len(a.logits), "--val-logits must match --logits one for one"
+    thr = np.stack([val_threshold(f) for f in a.val_logits])  # [S, 3]
+    print(f"thresholds chosen on validation, rule = {a.threshold_rule} (seed x criterion):")
+    for s in range(thr.shape[0]):
+        print("  seed", s, " ".join(f"C{c+1}={thr[s,c]:.3f}" for c in range(3)))
+else:
+    thr = np.full((probs.shape[0], 3), 0.5)
+    print("threshold: fixed 0.5")
 assert probs.shape[1] == len(meta)
 videos = meta["video_id"].to_numpy()
 uv = np.unique(videos)
@@ -45,15 +76,17 @@ def stats(idx, s):
         votes = meta[f"c{c}_votes"].to_numpy(int)[idx]
         r = meta[[f"c{c}_rater{k}" for k in (1, 2, 3)]].to_numpy(int)[idx]
         unan = np.isin(votes, [0, 3])
-        out[f"C{c} model unanimous"] = safe_bacc(y[unan], pr[unan, c-1] > 0.5)
-        out[f"C{c} model contested"] = safe_bacc(y[~unan], pr[~unan, c-1] > 0.5)
+        out[f"C{c} AP unanimous"] = average_precision_score(y[unan], pr[unan, c-1]) if y[unan].min() != y[unan].max() else np.nan
+        out[f"C{c} AP contested"] = average_precision_score(y[~unan], pr[~unan, c-1]) if y[~unan].min() != y[~unan].max() else np.nan
+        out[f"C{c} model unanimous"] = safe_bacc(y[unan], pr[unan, c-1] > thr[s, c-1])
+        out[f"C{c} model contested"] = safe_bacc(y[~unan], pr[~unan, c-1] > thr[s, c-1])
         ceil, diff = [], []
         for k in range(3):
             others = np.delete(r, k, axis=1)
             agree = others[:, 0] == others[:, 1]
             t = others[agree, 0]
             rb = safe_bacc(t, r[agree, k])
-            mb = safe_bacc(t, pr[agree, c-1] > 0.5)
+            mb = safe_bacc(t, pr[agree, c-1] > thr[s, c-1])
             ceil.append(rb); diff.append(mb - rb)
         out[f"C{c} ceiling"] = np.nanmean(ceil)
         out[f"C{c} model minus rater"] = np.nanmean(diff)
